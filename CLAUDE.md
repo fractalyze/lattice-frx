@@ -4,12 +4,18 @@ Read [README.md](README.md) first — it explains what this package is, why
 each module is here, and where the repo sits relative to the other
 `*-frx` repos. The rules below are the short imperative form of it.
 
-- **No frx dependency. Ever.** This package sits *below* enc-frx and
-  sig-frx, which already carry ML-KEM and ML-DSA; depending on either
-  would make their own adoption of this substrate circular. CI's
-  `no-frx-deps` job fails the build if `MODULE.bazel`,
-  `lattice_frx/BUILD.bazel`, or `requirements.in` names an frx module or
-  a crypto library. Do not "temporarily" add one.
+- **No dependency on a scheme repo. Ever.** This package sits *below*
+  enc-frx and sig-frx, which already carry ML-KEM and ML-DSA; depending on
+  either would make their own adoption of this substrate circular. Same for
+  hash-frx and for any crypto library. CI's `no-scheme-deps` job fails the
+  build if `MODULE.bazel`, `lattice_frx/BUILD.bazel`, or `requirements.in`
+  names one. Do not "temporarily" add one.
+- **The array layer is not that direction.** `frx` and `zk-dtypes` are
+  *below* enc-frx and sig-frx too — both already sit on them — so depending
+  on them closes no loop, and they are what a traced backend here is made
+  of. The circularity rule is about schemes, not about arrays; reading it as
+  "no frx of any kind" is what would push the traced ring into each consumer
+  and have it written three times.
 - **Inject primitives, don't depend on them.** A CSPRNG behind a uniform
   sampler, a hash behind a Fiat-Shamir transcript — those are the
   consumer's choice and arrive as arguments. The samplers' existing
@@ -40,6 +46,16 @@ each module is here, and where the repo sits relative to the other
   keyed to a *specific* reference at a *specific* moduli chain belongs to
   the consumer that derives those moduli — it tests "my dependency behaves
   correctly at my parameters". Don't pull one in here.
+- **So the NTT-order gate is the consumer's, and it has to actually run.**
+  The rule above and the NTT-order rule below would otherwise cancel out:
+  order is declared part of the contract, no property test can catch a
+  *consistent* permutation, and goldens are not kept here — which would
+  leave the property with no gate anywhere. Measured, with `ntt`'s output
+  and `intt`'s input permuted inversely, every suite in this repo stays
+  green. What closes it is the last rule on this page: a change to the
+  transform is a breaking change, and the consumer's pin bump plus its
+  cross-verification gates are the gate. Sequence it that way rather than
+  merging a transform change and bumping later.
 - **The NTT's output order is part of its contract.** `RnsRing`
   reproduces lattigo's bit-reversed table order natively and applies no
   output permutation. An NTT that computes the right values in the wrong

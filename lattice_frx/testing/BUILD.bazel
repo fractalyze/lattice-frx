@@ -23,21 +23,6 @@ pytest_test(
     ],
 )
 
-# The lattigo golden. `data` rather than `srcs`: the fixture is what lattigo
-# emitted and is read at runtime, and it is the only gate on the NTT's output
-# *order* — `ring_conformance_test` pins the contract and says it does not
-# cover this.
-pytest_test(
-    name = "ring_golden_test",
-    size = "small",
-    srcs = ["ring_golden_test.py"],
-    data = ["testdata/ntt_vectors.json"],
-    deps = [
-        "//lattice_frx",
-        "@lattice_frx_pip//numpy",
-    ],
-)
-
 pytest_test(
     name = "rns_test",
     size = "small",
