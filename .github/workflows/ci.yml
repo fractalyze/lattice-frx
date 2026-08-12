@@ -61,20 +61,23 @@ jobs:
       - name: Run pytest
         run: pytest -q
 
-  # This package must not grow an frx dependency: enc-frx and sig-frx each
-  # carry a lattice scheme, so a dependency in that direction would make their
-  # adoption of this substrate circular (README, "Where this sits").
-  no-frx-deps:
+  # This package must not grow a dependency on a *scheme* repo: enc-frx and
+  # sig-frx each carry a lattice scheme, so a dependency in that direction
+  # would make their adoption of this substrate circular (README, "Where this
+  # sits"). The array layer below them — frx and zk-dtypes — is not that
+  # direction and is allowed: sig-frx and enc-frx already sit on it, so
+  # depending on it closes no loop.
+  no-scheme-deps:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Assert no frx / crypto-library dependency
+      - name: Assert no scheme-repo or crypto-library dependency
         run: |
-          if grep -nE '^\s*(bazel_dep|.*requirement)\(.*(hash_frx|enc_frx|sig_frx|frx)' MODULE.bazel lattice_frx/BUILD.bazel; then
-            echo "::error::lattice-frx must not depend on an frx repo — see README 'Where this sits'." >&2
+          if grep -nE '^\s*(bazel_dep|.*requirement)\(.*(hash_frx|enc_frx|sig_frx)' MODULE.bazel lattice_frx/BUILD.bazel; then
+            echo "::error::lattice-frx must not depend on a scheme repo — see README 'Where this sits'." >&2
             exit 1
           fi
-          if grep -nE '^\s*(cryptography|pycryptodome|hash-frx|enc-frx|sig-frx|frx)\b' requirements.in; then
+          if grep -nE '^\s*(cryptography|pycryptodome|hash-frx|enc-frx|sig-frx)\b' requirements.in; then
             echo "::error::lattice-frx must not depend on a crypto library — inject it from the consumer." >&2
             exit 1
           fi
