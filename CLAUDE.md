@@ -27,6 +27,15 @@ each module is here, and where the repo sits relative to the other
   every residue below its own limb's modulus. Call it; never re-hand-write
   the comparison. Keep the two failure modes distinct — `TypeError` for
   dtype, `ValueError` for range — they are different caller bugs.
+- **The `uint64` contract is a HOST contract, not a device-shaped one**,
+  however much it looks like one. frx runs without x64, so `fnp.asarray`
+  narrows `uint64` to `uint32` and truncates every limb above `2**32`
+  *without raising* — at `MAX_MODULUS_BITS = 50` that is every limb this
+  package targets. A traced backend carries width in a field dtype
+  (`zk_dtypes.prime_field(q)`), which is per-modulus, so the traced shape
+  is one array per limb rather than one `(limbs, d)` array. Do not write
+  "device-shaped" about this contract, and do not assume `np` → `fnp` is
+  the migration. Issue #1 owns it.
 - **Tests are property-based** (`lattice_frx/testing/*_test.py`). A golden
   keyed to a *specific* reference at a *specific* moduli chain belongs to
   the consumer that derives those moduli — it tests "my dependency behaves
