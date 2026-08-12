@@ -36,13 +36,22 @@ un-Montgomeried (see `serde.py`'s docstring for that fold).
 
 **Public contract:** every `RnsRing` op below takes and returns
 `(limbs, d)` `dtype=np.uint64` numpy arrays of canonical (`< q_l` per
-limb) standard-form residues — the device-shaped contract a future
-`frx`/`lax.ntt` backend can fill natively, defined and enforced in
+limb) standard-form residues, defined and enforced in
 `lattice_frx/canonical.py`. Internally, each op converts to an
 object-dtype array of exact Python ints (the lattigo-order NTT and every
 other computation below is unchanged — d=256 makes the round-trip
 conversion free) and converts back on the way out; `_coerce` is the
 single entry point for that conversion plus the contract check.
+
+That contract is a *host* contract, and it is worth being explicit that
+it is not a device-shaped one, because it looks like it should be. frx
+runs without x64, so `fnp.asarray` on a `uint64` array yields `uint32` and
+truncates every limb above `2**32` without raising; with
+`MAX_MODULUS_BITS = 50` that is every limb this ring is built for. The
+width a traced backend can actually carry comes from a field dtype, whose
+storage follows its modulus (`zk_dtypes.prime_field(q)` mints a 64-bit
+field at a 50-bit `q`), not from an integer lane. See issue #1 for the
+measurement and for what the traced contract has to become.
 
 Lattigo functions ported here:
 
