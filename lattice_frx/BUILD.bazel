@@ -1,0 +1,18 @@
+load("@rules_python//python:defs.bzl", "py_library")
+
+# Keep this target free of any frx dependency: enc-frx and sig-frx each
+# carry a lattice scheme, so a dependency in that direction would make
+# their adoption of this substrate circular (see MODULE.bazel).
+py_library(
+    name = "lattice_frx",
+    srcs = [
+        "__init__.py",
+        "canonical.py",
+        "primes.py",
+        "ring.py",
+        "rns.py",
+        "sampler.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["@lattice_frx_pip//numpy"],
+)

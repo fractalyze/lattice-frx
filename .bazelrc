@@ -1,0 +1,12 @@
+# bazel 9 defaults to bzlmod (WORKSPACE is gone), so no enable flags needed.
+build --announce_rc
+test --test_output=errors
+
+# rules_python's legacy auto-generated __init__.py can be written through a
+# stale runfiles symlink during a full-suite run, truncating the SOURCE
+# __init__.py to 0 bytes (struck this repo 2026-08-10). Every package here
+# carries a real __init__.py, so the legacy behavior is pure hazard.
+build --incompatible_default_to_explicit_init_py
+
+# Local, machine-specific overrides (gitignored).
+try-import %workspace%/.bazelrc.user

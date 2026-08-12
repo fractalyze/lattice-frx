@@ -1,0 +1,80 @@
+name: CI
+
+permissions: read-all
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+# Cancel in-progress runs for a PR's branch, but never cancel pushes to main so
+# every merge gets a full run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # GitHub-hosted: the suite is pure Python with no GPU leg, and the repo is
+  # public — fork-PR jobs must not land on org runners.
+  bazel-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Hosted runners start cold, so persist bazel's caches across runs. The
+      # runner image ships bazelisk as `bazel`, which obeys .bazelversion.
+      - name: Mount bazel caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel-disk
+            ~/.cache/bazel-repo
+          key: bazel-${{ hashFiles('.bazelversion', 'MODULE.bazel.lock', 'requirements_lock_3_11.txt') }}
+          restore-keys: bazel-
+      - name: Run bazel test
+        run: >
+          bazel test
+          --disk_cache=~/.cache/bazel-disk
+          --repository_cache=~/.cache/bazel-repo
+          -- //...
+
+      # Capture the runner-local test.log a failed test leaves behind — the CI
+      # stream only carries the FAIL summary, not the pytest output.
+      - name: Upload bazel test logs
+        if: ${{ failure() }}
+        uses: fractalyze/.github/.github/actions/upload-bazel-testlogs@main
+        with:
+          name: bazel-test-logs
+
+  # The pip path the README documents, kept honest: `pip install -e '.[dev]'`
+  # plus a bare `pytest` has to work without Bazel, since that is how a
+  # consumer evaluating the package will first run it.
+  pip-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install lattice-frx
+        run: python -m pip install -e '.[dev]'
+      - name: Run pytest
+        run: pytest -q
+
+  # This package must not grow an frx dependency: enc-frx and sig-frx each
+  # carry a lattice scheme, so a dependency in that direction would make their
+  # adoption of this substrate circular (README, "Where this sits").
+  no-frx-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert no frx / crypto-library dependency
+        run: |
+          if grep -nE '^\s*(bazel_dep|.*requirement)\(.*(hash_frx|enc_frx|sig_frx|frx)' MODULE.bazel lattice_frx/BUILD.bazel; then
+            echo "::error::lattice-frx must not depend on an frx repo — see README 'Where this sits'." >&2
+            exit 1
+          fi
+          if grep -nE '^\s*(cryptography|pycryptodome|hash-frx|enc-frx|sig-frx|frx)\b' requirements.in; then
+            echo "::error::lattice-frx must not depend on a crypto library — inject it from the consumer." >&2
+            exit 1
+          fi

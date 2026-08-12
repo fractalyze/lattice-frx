@@ -1,0 +1,45 @@
+load("//tools:pytest_test.bzl", "pytest_test")
+
+# Test-only package: excluded from the wheel (see pyproject.toml). Each file
+# is its own py_test routed through tools/pytest_main.py — a bare py_test on a
+# pytest-style file collects nothing and passes vacuously.
+pytest_test(
+    name = "canonical_test",
+    size = "small",
+    srcs = ["canonical_test.py"],
+    deps = [
+        "//lattice_frx",
+        "@lattice_frx_pip//numpy",
+    ],
+)
+
+pytest_test(
+    name = "ring_conformance_test",
+    size = "small",
+    srcs = ["ring_conformance_test.py"],
+    deps = [
+        "//lattice_frx",
+        "@lattice_frx_pip//numpy",
+    ],
+)
+
+pytest_test(
+    name = "rns_test",
+    size = "small",
+    srcs = ["rns_test.py"],
+    deps = [
+        "//lattice_frx",
+        "@lattice_frx_pip//numpy",
+    ],
+)
+
+pytest_test(
+    name = "sampler_test",
+    size = "medium",
+    srcs = ["sampler_test.py"],
+    deps = [
+        "//lattice_frx",
+        "@lattice_frx_pip//numpy",
+        "@lattice_frx_pip//scipy",
+    ],
+)

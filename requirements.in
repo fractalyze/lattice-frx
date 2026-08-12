@@ -1,0 +1,10 @@
+# lattice-frx dependencies (runtime + test), all upstream PyPI.
+# Regenerate the lock with `bazel run //:requirements.update`.
+#
+# numpy is the only runtime dependency — deliberately, since this package
+# sits below enc-frx/sig-frx and must not pull a crypto library in (see
+# MODULE.bazel). pytest and scipy are test-only; scipy backs the sampler's
+# distribution checks (chi-square / Kolmogorov-Smirnov).
+numpy
+pytest
+scipy

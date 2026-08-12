@@ -1,0 +1,46 @@
+# lattice-frx builds via Bazel (MODULE.bazel) and is consumed two ways: as a
+# bzlmod module (`bazel_dep` + `git_override`), and as a wheel from a pip lock.
+# The packaging tables below serve the second.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lattice-frx"
+dynamic = ["version"]
+description = "lattice-frx — scheme-agnostic lattice substrate: negacyclic NTT rings, RNS/CRT basis conversion, and exact discrete Gaussian samplers."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The lattice-frx Authors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+]
+# numpy alone, and that is a design constraint rather than a coincidence: this
+# package sits below enc-frx and sig-frx, which each carry a lattice scheme, so
+# depending on either would make their adoption of this substrate circular. A
+# consumer that needs a CSPRNG behind the uniform sampler, or a hash behind a
+# Fiat-Shamir transcript, injects it. scipy is test-only.
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest", "scipy"]
+
+[project.urls]
+Repository = "https://github.com/fractalyze/lattice-frx"
+
+[tool.setuptools.dynamic]
+version = { attr = "lattice_frx.__version__" }
+
+# Ship the runtime tree only; `testing/` holds the suite, not package API.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lattice_frx*"]
+exclude = ["lattice_frx.testing", "lattice_frx.testing.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["lattice_frx"]
+python_files = ["*_test.py"]

@@ -1,0 +1,247 @@
+"""Tests for `lattice_frx.sampler`'s tiered Gaussian samplers.
+
+`sampler_for`'s tier gate is exercised against a *real* concrete
+parameter set rather than round numbers — the six σ and the draw count
+below come from the Jindo lattice PCS (ePrint 2026/044) at its
+`n=1024, batch=1` point, inlined as constants so this package keeps no
+dependency on a consumer's parameter search.
+
+They are worth pinning because they span the whole gate: two σ are small
+enough for exact explicit support, and the other four sit far below the
+σ≈2**50 regime where the rounded tier's Theorem-9 budget could clear
+`2**-64`, so they fall through to exact rejection sampling. A parameter
+set landing in the rounded tier is the case not covered here, and
+`test_rounded_tier_is_selected_in_the_large_sigma_regime` covers it
+synthetically.
+"""
+import math
+
+import numpy as np
+import pytest
+from scipy import stats
+
+from lattice_frx import sampler
+
+# Jindo (ePrint 2026/044) at n=1024, batch=1 -- see the module docstring.
+SMALL_SIGMA = {
+    "ecd_std_dev": 4.787466224214409,
+    "mlwe_std_dev": 6.770275002573077,
+}
+WIDE_SIGMA = {
+    "ecd_blind_std_dev": 1154200.6570634034,
+    "mask_std_dev": 1733.2479139039056,
+    "mask_blind_std_dev": 417865273.06726474,
+    "mask_mlwe_std_dev": 2451.1013707864035,
+}
+# The conservative per-proof scalar-draw count that parameter set derives.
+SAMPLE_COUNT = 1089792
+
+
+def _bin_counts(samples: np.ndarray, lo: int, hi: int) -> tuple[np.ndarray, int]:
+    """Histogram `samples` over the closed integer range `[lo, hi]`.
+    Returns `(counts, n_outside)` — `counts[x - lo]` for `x` in range, and
+    the count of samples that fell outside it (should be ~0 whenever
+    `[lo, hi]` is a wide-enough tail cut)."""
+    vals, cnts = np.unique(samples, return_counts=True)
+    counts = np.zeros(hi - lo + 1, dtype=np.float64)
+    in_range = (vals >= lo) & (vals <= hi)
+    counts[(vals[in_range] - lo).astype(np.int64)] = cnts[in_range]
+    return counts, int(cnts[~in_range].sum())
+
+
+def _chi_square_vs_true_gaussian(samples: np.ndarray, center: float, sigma: float, tail_cut: float = 8.0):
+    """χ² goodness-of-fit of `samples` against the (tail-truncated) true
+    discrete Gaussian density at `(center, sigma)`. `tail_cut=8` truncates
+    at a window wide enough (~1e-14 tail mass) that no real sample should
+    ever land outside it; bins with expected count < 5 are merged away
+    (scipy's own rule of thumb) so the statistic isn't dominated by noise
+    in bins nobody was ever going to land in."""
+    n = samples.shape[0]
+    k = math.ceil(tail_cut * sigma) + 1
+    lo, hi = int(round(center)) - k, int(round(center)) + k
+
+    xs = np.arange(lo, hi + 1)
+    weights = np.exp(-((xs - center) ** 2) / (2.0 * sigma * sigma))
+    expected = weights / weights.sum() * n
+
+    observed, outside = _bin_counts(samples, lo, hi)
+    assert outside == 0, f"{outside} sample(s) fell outside the {tail_cut}-sigma reference window"
+
+    keep = expected >= 5.0
+    observed, expected = observed[keep], expected[keep]
+    expected *= observed.sum() / expected.sum()  # renormalize after trimming
+    return stats.chisquare(observed, expected)
+
+
+def test_discrete_gaussian_window_matches_brief_formula():
+    # "round(c) ± ceil(tail_cut*sigma)+1" (task-10-brief.md) => a window of
+    # 2*(ceil(tail_cut*sigma)+1)+1 candidate integers per center.
+    rng = np.random.default_rng(0)
+    sigma, tail_cut = 5.0, 5.0
+    k = math.ceil(tail_cut * sigma) + 1
+    samples = sampler.discrete_gaussian(rng, np.array([0.0]), sigma, tail_cut=tail_cut)
+    assert samples.shape == (1,)
+    # A single draw always lands inside the explicit window.
+    assert abs(int(samples[0])) <= k
+
+
+@pytest.mark.parametrize("center", [0.0, 0.37])
+def test_discrete_gaussian_chi_square(center):
+    rng = np.random.default_rng(1234)
+    sigma, n = 5.0, 200_000
+    samples = sampler.discrete_gaussian(rng, np.full(n, center), sigma)
+    chi2 = _chi_square_vs_true_gaussian(samples, center, sigma)
+    assert chi2.pvalue > 1e-6
+
+
+@pytest.mark.parametrize("sigma", [30.0, 200.0])
+@pytest.mark.parametrize("center", [0.0, 0.37])
+def test_rejection_gaussian_chi_square(sigma, center):
+    rng = np.random.default_rng(int(sigma) * 1000 + 7)
+    n = 200_000
+    samples = sampler.rejection_gaussian(rng, np.full(n, center), sigma)
+    chi2 = _chi_square_vs_true_gaussian(samples, center, sigma)
+    assert chi2.pvalue > 1e-6
+
+
+@pytest.mark.parametrize("center", [0.0, 0.37])
+def test_rejection_gaussian_cross_checks_against_discrete_gaussian(center):
+    # Two independently-implemented exact samplers (finite-support inversion
+    # vs. Laplace-proposal rejection) agreeing on their sample distribution
+    # is the strongest fidelity check available without a closed-form
+    # reference -- run at sigma=30, where both tiers are actually usable
+    # (discrete_gaussian's window is 2*151+1=303, well under the 4096 cap).
+    #
+    # This compares two *samples* to each other, not a sample against a
+    # fixed/exact model (unlike `_chi_square_vs_true_gaussian`), so
+    # `stats.chisquare` is the wrong tool: it treats `f_exp` as exact,
+    # zero-variance probabilities, but a same-size random sample used as
+    # `f_exp` carries its own sampling variance, understating the null's
+    # true variance and biasing toward spuriously tiny p-values.
+    # `chi2_contingency`'s homogeneity test on a 2xB contingency table
+    # accounts for both samples' variance, the correct form for "do these
+    # two independent samples come from the same distribution".
+    sigma, n = 30.0, 200_000
+    explicit = sampler.discrete_gaussian(np.random.default_rng(21), np.full(n, center), sigma)
+    rejection = sampler.rejection_gaussian(np.random.default_rng(22), np.full(n, center), sigma)
+
+    tail_cut = 8.0
+    k = math.ceil(tail_cut * sigma) + 1
+    lo, hi = int(round(center)) - k, int(round(center)) + k
+    exp_counts, exp_outside = _bin_counts(explicit, lo, hi)
+    rej_counts, rej_outside = _bin_counts(rejection, lo, hi)
+    assert exp_outside == 0 and rej_outside == 0
+
+    keep = exp_counts >= 5.0
+    table = np.vstack([exp_counts[keep], rej_counts[keep]])
+    result = stats.chi2_contingency(table)
+    assert result.pvalue > 1e-6
+
+
+def test_rejection_gaussian_mean_and_variance_sanity_at_large_sigma():
+    rng = np.random.default_rng(43)
+    sigma, n, center = 4.18e8, 100_000, 12345.6789
+    samples = sampler.rejection_gaussian(rng, np.full(n, center), sigma)
+    assert samples.shape == (n,)
+
+    mean = samples.mean()
+    var = samples.astype(np.float64).var()
+    assert abs(mean - center) < 5 * sigma / math.sqrt(n)  # standard error of the mean
+    assert abs(var - sigma * sigma) / (sigma * sigma) < 0.05
+
+
+@pytest.mark.parametrize("sigma", [30.0, 200.0, 4.18e8])
+def test_rejection_gaussian_acceptance_rate(sigma):
+    # A single (non-retried) round of the propose/accept step, so this
+    # measures the same per-round acceptance rate the K-bound derivation
+    # in rejection_gaussian's docstring claims is comfortably >= ~0.5 for
+    # these sigma (this is the module-private seam mentioned in encoder.py
+    # -- direct access is deliberate here, to inspect the mechanism the
+    # public retry loop hides).
+    rng = np.random.default_rng(int(sigma) % 997 + 1)
+    centers = rng.uniform(-1.0, 1.0, 50_000)
+    x0 = np.rint(centers)
+    k_bound = sampler._laplace_rejection_bound(sigma)
+    _, accept = sampler._laplace_rejection_round(rng, centers, x0, sigma, k_bound)
+    assert accept.mean() >= 0.4, accept.mean()
+
+
+def test_rounded_gaussian_mean_and_variance_sanity():
+    rng = np.random.default_rng(42)
+    sigma, n = 2.0**20, 200_000
+    samples = sampler.rounded_gaussian(rng, np.zeros(n), sigma)
+    assert samples.shape == (n,)
+
+    mean = samples.mean()
+    var = samples.astype(np.float64).var()
+    # Rounding to the nearest integer perturbs mean/variance by O(1),
+    # utterly negligible next to sigma=2**20 ~ 1e6.
+    assert abs(mean) < 5 * sigma / math.sqrt(n)  # standard error of the mean
+    assert abs(var - sigma * sigma) / (sigma * sigma) < 0.05
+
+
+def test_sampler_for_small_sigma_tiers_use_explicit_support():
+    for name, sigma in SMALL_SIGMA.items():
+        fn = sampler.sampler_for(sigma, SAMPLE_COUNT)
+        assert fn is sampler.discrete_gaussian, name
+
+
+def test_sampler_for_window_gate_matches_discrete_gaussian_window():
+    # The gate's window estimate and discrete_gaussian's actual allocated
+    # window must now agree exactly (fix round 1, item 3) -- not just be
+    # "close" -- so this pins the formula on both sides together instead
+    # of just re-deriving sampler_for's copy in isolation.
+    tail_cut = 5.0
+    for sigma in (4.79, 6.77, 100.0, 4095.0):
+        k = math.ceil(tail_cut * sigma) + 1
+        gate_window = 2 * (math.ceil(tail_cut * sigma) + 1) + 1
+        actual_window = 2 * k + 1
+        assert gate_window == actual_window
+
+
+def test_sampler_for_resolves_every_concrete_sigma_without_raising():
+    expected_tier = {
+        **{name: sampler.discrete_gaussian for name in SMALL_SIGMA},
+        **{name: sampler.rejection_gaussian for name in WIDE_SIGMA},
+    }
+    for name, sigma in {**SMALL_SIGMA, **WIDE_SIGMA}.items():
+        got = sampler.sampler_for(sigma, SAMPLE_COUNT)
+        assert got is expected_tier[name], (name, sigma, got)
+
+
+def test_rounded_tier_is_selected_in_the_large_sigma_regime():
+    """The tier no concrete parameter set above reaches: sigma wide enough
+    that the per-sample Theorem-9 distance, unioned over every draw, is
+    still below 2**-64."""
+    sigma = 2.0**50
+    assert sampler.rounded_gaussian_distance(sigma) * SAMPLE_COUNT < 2**-64
+    assert sampler.sampler_for(sigma, SAMPLE_COUNT) is sampler.rounded_gaussian
+
+
+def test_a_large_enough_draw_count_pushes_the_rounded_tier_to_rejection():
+    """The union bound is what the count feeds, so raising it alone must be
+    able to disqualify a sigma the smaller count admitted."""
+    sigma = 2.0**50
+    per_sample = sampler.rounded_gaussian_distance(sigma)
+    too_many = int(2**-64 / per_sample) + 1
+    assert sampler.sampler_for(sigma, too_many) is sampler.rejection_gaussian
+
+
+@pytest.mark.parametrize("bad_count", [0, -1])
+def test_sampler_for_rejects_a_non_positive_sample_count(bad_count):
+    with pytest.raises(ValueError, match="sample_count"):
+        sampler.sampler_for(100.0, bad_count)
+
+
+@pytest.mark.parametrize("sigma", [0.0, -1.0])
+def test_sampler_for_raises_only_for_degenerate_sigma(sigma):
+    with pytest.raises(ValueError, match="sigma"):
+        sampler.sampler_for(sigma, SAMPLE_COUNT)
+
+
+@pytest.mark.parametrize("sigma", [0.0, -1.0])
+def test_rejection_gaussian_raises_for_degenerate_sigma(sigma):
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match="rejection_gaussian"):
+        sampler.rejection_gaussian(rng, np.array([0.0]), sigma)
+

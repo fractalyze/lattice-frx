@@ -1,0 +1,32 @@
+# Commit-scope policy for lattice-frx.
+#
+# The package is flat modules directly under lattice_frx/, so directory
+# derivation collapses most changes to the root. The scope is optional; use one
+# only when it is a real changed-file root or an alias below.
+
+roots = ["lattice_frx"]
+require_scope = false
+
+exempt_paths = [
+  "docs",
+  "README.md",
+  "CLAUDE.md",
+  "LICENSE",
+  ".github",
+  ".gitignore",
+  ".bazelrc",
+  ".bazelversion",
+  ".pre-commit-config.yaml",
+  ".fractal-commit-lint.toml",
+  "tools",
+  "pyproject.toml",
+  "requirements.in",
+  "requirements_lock_3_11.txt",
+  "MODULE.bazel",
+  "MODULE.bazel.lock",
+  "BUILD.bazel",
+  "lattice_frx/BUILD.bazel",
+]
+
+[scopes]
+testing = ["lattice_frx/testing"]

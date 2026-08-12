@@ -1,0 +1,35 @@
+"""lattice-frx — the scheme-agnostic lattice substrate.
+
+bzlmod module. bazel 9 dropped WORKSPACE support, so dependencies and the
+hermetic Python toolchain are declared here.
+
+**No frx dependencies, deliberately.** This package sits below the
+function-split repos (enc-frx, sig-frx), both of which already carry a
+lattice scheme — ML-KEM and ML-DSA respectively. A dependency in the
+other direction would make their adoption of this substrate circular. The
+cryptographic primitives a lattice scheme also needs (a CSPRNG behind the
+uniform sampler, a hash behind a Fiat-Shamir transcript) are therefore
+injected by the consumer rather than depended on here. See the README's
+"Where this sits" section.
+"""
+
+module(
+    name = "lattice_frx",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "rules_python", version = "1.7.0")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.11",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "lattice_frx_pip",
+    python_version = "3.11",
+    requirements_lock = "//:requirements_lock_3_11.txt",
+)
+use_repo(pip, "lattice_frx_pip")
