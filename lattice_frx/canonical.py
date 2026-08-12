@@ -22,6 +22,16 @@ Two shapes, because callers need two different answers:
   operation; an out-of-range residue is a value that skipped a
   reduction. Collapsing them into one exception type loses that.
 
+This is a host contract, and `uint64` is not the device-shaped one it
+resembles: frx runs without x64, so `fnp.asarray` narrows it to `uint32` and
+truncates any residue above `2**32` silently, which at
+`primes.MAX_MODULUS_BITS = 50` is every limb the package targets. A
+traced contract carries its width in a field dtype instead
+(`zk_dtypes.prime_field(q)`), and since that dtype is per-modulus it
+cannot be one array across limbs of different `q_l` — so the traced form
+of this contract is per-limb, not `(limbs, d)`. Issue #1 carries the
+measurement and the migration.
+
 The dtype rule is deliberately strict — no "close enough" integer dtype
 is accepted. A signed array carrying the same values wraps on the first
 operation here, and an `object` array of host-side Python ints silently
@@ -85,8 +95,8 @@ def require_canonical(arr: np.ndarray, q_moduli, context: str) -> None:
     """
     if arr.dtype != _CONTRACT_DTYPE:
         raise TypeError(
-            f"{context}: expected dtype=np.uint64 (the device-shaped "
-            f"ring contract); got dtype={arr.dtype!r}"
+            f"{context}: expected dtype=np.uint64 (the host ring "
+            f"contract); got dtype={arr.dtype!r}"
         )
     if not _residues_in_range(arr, tuple(int(q) for q in q_moduli)):
         raise ValueError(
