@@ -5,10 +5,10 @@ forward / GS inverse core loops), specialized to the Standard NTT
 
 This is the interop-riskiest module here: an NTT that computes the
 *right values in the wrong order* is silently wrong for every downstream
-consumer that mixes reference-ring output with lattigo wire bytes. The
-golden (`testing/testdata/ntt_vectors.json`, Task 7) was produced by
-lattigo's actual `MForm`+`NTT`, so `ntt()`/`intt()` below reproduce
-lattigo's own bit-reversed table order and CT/GS loop structure natively —
+consumer that mixes reference-ring output with lattigo wire bytes. That
+ordering was pinned against vectors produced by lattigo's actual
+`MForm`+`NTT`, so `ntt()`/`intt()` below reproduce lattigo's own
+bit-reversed table order and CT/GS loop structure natively —
 **no output permutation is applied anywhere in this module.** (A
 permutation *adapter* belongs to a future accelerated backend that computes
 NTT in a different natural order and needs to present lattigo's order at
