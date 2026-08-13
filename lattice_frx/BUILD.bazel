@@ -1,18 +1,25 @@
 load("@rules_python//python:defs.bzl", "py_library")
 
-# Keep this target free of any frx dependency: enc-frx and sig-frx each
-# carry a lattice scheme, so a dependency in that direction would make
-# their adoption of this substrate circular (see MODULE.bazel).
+# Keep this target free of any *scheme* dependency: enc-frx and sig-frx each
+# carry a lattice scheme, so a dependency in that direction would make their
+# adoption of this substrate circular (see MODULE.bazel). frx and zk_dtypes
+# are the array layer below all of them and are what `ring.py` is made of.
 py_library(
     name = "lattice_frx",
     srcs = [
         "__init__.py",
         "canonical.py",
+        "host_ring.py",
         "primes.py",
         "ring.py",
         "rns.py",
+        "roots.py",
         "sampler.py",
     ],
     visibility = ["//visibility:public"],
-    deps = ["@lattice_frx_pip//numpy"],
+    deps = [
+        "@lattice_frx_pip//frx",
+        "@lattice_frx_pip//numpy",
+        "@lattice_frx_pip//zk_dtypes",
+    ],
 )

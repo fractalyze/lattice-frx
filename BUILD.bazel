@@ -6,5 +6,6 @@ exports_files(["requirements_lock_3_11.txt"])
 compile_pip_requirements(
     name = "requirements",
     src = "requirements.in",
+    extra_args = ["--extra-index-url=https://fractalyze.github.io/pypi/simple/"],
     requirements_txt = "requirements_lock_3_11.txt",
 )

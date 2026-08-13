@@ -38,7 +38,8 @@ Every sampler takes its randomness as an injected
 `rng: np.random.Generator` rather than constructing one. That is the rule
 this package holds to generally: the *choice* of randomness source (and
 of any CSPRNG behind it) belongs to the consumer, so that this package
-keeps no dependency on a cipher or hash library.
+keeps no dependency on a cipher or hash library. (frx and
+zk-dtypes are the array layer, not primitives — see CLAUDE.md.)
 """
 import math
 

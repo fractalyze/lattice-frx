@@ -1,11 +1,12 @@
 """Backend-conformance suite for the `(limbs, d)` uint64 ring/RNS contract.
 
-Parameterized over backend name (today: `"reference"` only -- the
-parameterization is the point: adding a device backend to `BACKENDS`
-below is one line, and every test in this module then runs against both
-backends automatically, no test bodies touched). For each backend this
-module asserts the properties ANY correct backend implementing the
-public contract (`_lattice/ring.py`'s module docstring: `(limbs, d)`
+Parameterized over backend name (today: `"reference"` only). `ring.RnsRing`
+is deliberately NOT in `BACKENDS`: it does not implement this contract and
+cannot, since a field dtype is per-modulus and its element is therefore one
+array per limb rather than one `(limbs, d)` uint64 array. Its own conformance
+is `ring_test.py`, which pins it against this one op for op. What is parameterized here is any future backend that does speak
+the host contract. For each such backend this module asserts the properties
+ANY correct backend implementing the public contract (`_lattice/ring.py`'s module docstring: `(limbs, d)`
 `dtype=np.uint64` arrays of canonical, `< q_l`-per-limb, standard-form
 residues) must satisfy:
 
@@ -39,14 +40,16 @@ import random
 import numpy as np
 import pytest
 
-from lattice_frx import ring as ring_mod
+from lattice_frx import host_ring as host_mod
 from lattice_frx import rns
 
 # Backend registry: name -> `RnsRing`-alike constructor `(q_moduli, d)`.
 # Every value here must satisfy this module's whole property set; a
-# device backend joins by adding one entry, e.g. "frx": frx_ring.FrxRing.
+# Another host-contract implementation joins by adding one entry. `RnsRing`
+# is not one and cannot be: its element is per-limb field arrays, not a
+# `(limbs, d)` uint64 array, and `ring_test` is its conformance instead.
 BACKENDS = {
-    "reference": ring_mod.RnsRing,
+    "reference": host_mod.HostRnsRing,
 }
 
 Q_MODULI = (34359753217, 34359754753)

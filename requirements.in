@@ -1,10 +1,18 @@
 # lattice-frx dependencies (runtime + test), all upstream PyPI.
 # Regenerate the lock with `bazel run //:requirements.update`.
 #
-# numpy is the only runtime dependency — deliberately, since this package
-# sits below enc-frx/sig-frx and must not pull a crypto library in (see
+# numpy backs the host reference ring; frx and zk-dtypes back the device one.
+# Neither is a crypto library and neither is a scheme repo — enc-frx and
+# sig-frx already sit on both, so depending on them closes no loop (see
 # MODULE.bazel). pytest and scipy are test-only; scipy backs the sampler's
 # distribution checks (chi-square / Kolmogorov-Smirnov).
+#
+# frx / frxlib / zk-dtypes move in lockstep: a frx wheel bump that leaves
+# zk-dtypes behind fails at the field dtypes rather than at the pin. These are
+# the versions sig-frx runs, which is the pair known to agree.
 numpy
+frx==0.10.2.dev20260812130529
+frxlib==0.10.2.dev20260812130529
+zk-dtypes==0.0.14
 pytest
 scipy

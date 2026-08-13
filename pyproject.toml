@@ -19,12 +19,21 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
 ]
-# numpy alone, and that is a design constraint rather than a coincidence: this
-# package sits below enc-frx and sig-frx, which each carry a lattice scheme, so
-# depending on either would make their adoption of this substrate circular. A
-# consumer that needs a CSPRNG behind the uniform sampler, or a hash behind a
-# Fiat-Shamir transcript, injects it. scipy is test-only.
-dependencies = ["numpy"]
+# numpy for the host reference ring, frx and zk-dtypes for the device one, and
+# nothing else — a design constraint rather than a coincidence. This package
+# sits below enc-frx and sig-frx, which each carry a lattice scheme, so
+# depending on either would make their adoption of this substrate circular;
+# frx and zk-dtypes are the array layer those two already sit on, so they
+# close no loop. A consumer that needs a CSPRNG behind the uniform sampler, or
+# a hash behind a Fiat-Shamir transcript, still injects it. scipy is test-only.
+#
+# The frx floor carries the `.dev0` sentinel rather than being a plain
+# `>=0.10.2`, because a consuming workspace pins an exact continuously-bumped
+# dev build and `0.10.2.devN` sorts BELOW `0.10.2` — a plain floor would reject
+# the very pin `requirements.in` sets. frx is published on the Fractalyze
+# index, not PyPI, so an install needs
+# `--extra-index-url=https://fractalyze.github.io/pypi/simple/`.
+dependencies = ["numpy", "frx>=0.10.2.dev0", "zk-dtypes>=0.0.14"]
 
 [project.optional-dependencies]
 dev = ["pytest", "scipy"]
