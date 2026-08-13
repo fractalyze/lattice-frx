@@ -3,14 +3,20 @@
 bzlmod module. bazel 9 dropped WORKSPACE support, so dependencies and the
 hermetic Python toolchain are declared here.
 
-**No frx dependencies, deliberately.** This package sits below the
-function-split repos (enc-frx, sig-frx), both of which already carry a
-lattice scheme — ML-KEM and ML-DSA respectively. A dependency in the
-other direction would make their adoption of this substrate circular. The
-cryptographic primitives a lattice scheme also needs (a CSPRNG behind the
-uniform sampler, a hash behind a Fiat-Shamir transcript) are therefore
-injected by the consumer rather than depended on here. See the README's
-"Where this sits" section.
+**No dependency on a scheme repo, deliberately.** This package sits below
+the function-split repos (enc-frx, sig-frx), both of which already carry a
+lattice scheme — ML-KEM and ML-DSA respectively. A dependency in that
+direction would make their adoption of this substrate circular, and the
+same goes for hash-frx and for any crypto library: the primitives a
+lattice scheme also needs (a CSPRNG behind the uniform sampler, a hash
+behind a Fiat-Shamir transcript) are injected by the consumer rather than
+depended on here.
+
+**frx and zk-dtypes are not that direction.** They are the array layer
+enc-frx and sig-frx themselves sit on, so depending on them closes no
+loop, and they are what the device ring is made of — a 50-bit limb needs a
+field dtype, because frx runs without x64 and an integer lane truncates it
+silently. See the README's "Where this sits" section.
 """
 
 module(
@@ -28,6 +34,8 @@ python.toolchain(
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
+    # frx / frxlib are published on the Fractalyze index, not PyPI.
+    extra_pip_args = ["--extra-index-url=https://fractalyze.github.io/pypi/simple/"],
     hub_name = "lattice_frx_pip",
     python_version = "3.11",
     requirements_lock = "//:requirements_lock_3_11.txt",

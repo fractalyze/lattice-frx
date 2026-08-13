@@ -19,8 +19,9 @@ each module is here, and where the repo sits relative to the other
 - **Inject primitives, don't depend on them.** A CSPRNG behind a uniform
   sampler, a hash behind a Fiat-Shamir transcript — those are the
   consumer's choice and arrive as arguments. The samplers' existing
-  `rng: np.random.Generator` parameter is the pattern to copy. numpy is
-  the only runtime dependency.
+  `rng: np.random.Generator` parameter is the pattern to copy. The runtime
+  dependencies are numpy, frx and zk-dtypes and nothing else — the array
+  layer, never a primitive.
 - **Never take a consumer's parameter object.** Signatures take
   primitives, containers, and this package's own types. `sampler_for`
   takes the draw count as an `int`, not a `Parameters` — the first
@@ -39,9 +40,10 @@ each module is here, and where the repo sits relative to the other
   *without raising* — at `MAX_MODULUS_BITS = 50` that is every limb this
   package targets. A traced backend carries width in a field dtype
   (`zk_dtypes.prime_field(q)`), which is per-modulus, so the traced shape
-  is one array per limb rather than one `(limbs, d)` array. Do not write
-  "device-shaped" about this contract, and do not assume `np` → `fnp` is
-  the migration. Issue #1 owns it.
+  is one array per limb rather than one `(limbs, d)` array — which is what
+  `ring.py` carries and `host_ring.py` does not. Do not write "device-shaped"
+  about the `uint64` contract, and do not assume `np` → `fnp` is the
+  migration.
 - **Tests are property-based** (`lattice_frx/testing/*_test.py`). A golden
   keyed to a *specific* reference at a *specific* moduli chain belongs to
   the consumer that derives those moduli — it tests "my dependency behaves
@@ -56,9 +58,10 @@ each module is here, and where the repo sits relative to the other
   transform is a breaking change, and the consumer's pin bump plus its
   cross-verification gates are the gate. Sequence it that way rather than
   merging a transform change and bumping later.
-- **The NTT's output order is part of its contract.** `RnsRing`
+- **The NTT's output order is part of its contract.** `HostRnsRing`
   reproduces lattigo's bit-reversed table order natively and applies no
-  output permutation. An NTT that computes the right values in the wrong
+  output permutation; `RnsRing` presents the same order with exactly one
+  bit-reversal at its boundary, because the opcode emits natural order. An NTT that computes the right values in the wrong
   order is silently wrong for anything mixing this output with another
   implementation's bytes, and no property test catches it — a permutation
   belongs in an accelerated backend's boundary adapter, not here.

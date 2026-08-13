@@ -22,7 +22,12 @@ security is expressed as a bound on their norm — **while their storage is
 residues mod q**. Moving between those two views, exactly and without
 sign or tie-breaking errors, is most of the work.
 
-### `ring.py` — the ring and its NTT
+### `ring.py` and `host_ring.py` — the ring and its NTT
+
+Two implementations of one ring. `ring.py` is the default: per-limb field
+arrays, `frx.lax.ntt`, composes into a `jit` zone. `host_ring.py` is the same
+ring over exact Python integers — slower, obviously right, and the only place a
+reconstruction or a balanced lift can happen, since neither fits a lane.
 
 The Number Theoretic Transform is the FFT over a finite field: transform
 both operands, multiply pointwise, transform back. The negacyclic ring
@@ -33,7 +38,7 @@ The subtlety worth knowing before you use this: **the order an NTT emits
 its outputs in is implementation-defined** (bit-reversed vs natural). Two
 libraries computing "the same" NTT agree on the values and can disagree on
 their order, which is silently wrong for anything that mixes one's output
-with the other's bytes. `RnsRing` reproduces lattigo's own bit-reversed
+with the other's bytes. `HostRnsRing` reproduces lattigo's own bit-reversed
 table order natively and applies no output permutation anywhere. A
 permutation *adapter* belongs to an accelerated backend that computes in a
 different natural order and has to present lattigo's at its boundary.

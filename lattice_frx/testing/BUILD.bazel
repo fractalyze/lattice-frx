@@ -14,12 +14,28 @@ pytest_test(
 )
 
 pytest_test(
-    name = "ring_conformance_test",
+    name = "host_ring_conformance_test",
     size = "small",
-    srcs = ["ring_conformance_test.py"],
+    srcs = ["host_ring_conformance_test.py"],
     deps = [
         "//lattice_frx",
         "@lattice_frx_pip//numpy",
+    ],
+)
+
+# The ring against the host implementation that doubles as its oracle.
+# `frx`/`zk_dtypes` come in here because the ring under test is made of them;
+# the host side it is checked against stays numpy-only, which is what makes it
+# an independent check rather than a restatement.
+pytest_test(
+    name = "ring_test",
+    size = "medium",
+    srcs = ["ring_test.py"],
+    deps = [
+        "//lattice_frx",
+        "@lattice_frx_pip//frx",
+        "@lattice_frx_pip//numpy",
+        "@lattice_frx_pip//zk_dtypes",
     ],
 )
 
