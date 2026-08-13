@@ -49,7 +49,7 @@ bit.
 
 **Public contract:** wherever this module interfaces with ring data it
 uses the same `(limbs, d)` `dtype=np.uint64` contract as
-`lattice_frx/ring.py`, defined in `lattice_frx/canonical.py` --
+`lattice_frx/host_ring.py`, defined in `lattice_frx/canonical.py` --
 `reconstruct_centered`'s `coeffs` and `set_big_coeffs`'s/`lift_centered`'s
 return. `reconstruct_centered`'s own return stays `list[int]`: the whole
 point of this function is being the host boundary where RNS residues
@@ -68,7 +68,7 @@ from lattice_frx.primes import MAX_MODULUS, MAX_MODULUS_BITS
 
 def _coerce(coeffs: np.ndarray, q_moduli: tuple[int, ...], name: str) -> np.ndarray:
     """Boundary for this module's free-standing functions, mirroring
-    `RnsRing._coerce` (ring.py): the array contract is checked by
+    `HostRnsRing._coerce` (host_ring.py): the array contract is checked by
     `canonical.require_canonical` and the array returned unchanged --
     every element read below already goes through `int(coeffs[...])`, so
     this module's arithmetic is dtype-agnostic once past this gate.

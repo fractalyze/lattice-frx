@@ -105,6 +105,54 @@ def test_arithmetic_agrees_with_the_reference(rings, op: str) -> None:
     assert np.array_equal(dev.to_host(got), want)
 
 
+@pytest.mark.parametrize(
+    "make_bad, want_error",
+    [
+        (
+            lambda: np.array([[q] * _D for q in _Q_MODULI], dtype=np.uint64),
+            ValueError,
+        ),
+        (
+            lambda: np.array([[1] * _D for _ in _Q_MODULI], dtype=np.int64),
+            TypeError,
+        ),
+    ],
+    ids=["residue-at-the-modulus", "signed-dtype"],
+)
+def test_from_host_rejects_what_the_reference_rejects(
+    rings, make_bad, want_error
+) -> None:
+    """Both rings refuse the same non-canonical input, with the same error type.
+
+    The two failure modes stay distinct here for the reason `canonical.py`
+    gives — a wrong dtype and an out-of-range residue are different caller
+    bugs. Without the check `from_host` accepted both: a residue equal to its
+    modulus came back as `0`, which is a wrong answer rather than a refusal,
+    and only on this ring.
+    """
+    ref, dev = rings
+    bad = make_bad()
+    with pytest.raises(want_error):
+        ref.add(bad, bad)
+    with pytest.raises(want_error):
+        dev.from_host(bad)
+
+
+def test_each_ring_names_itself_when_it_refuses(rings) -> None:
+    """The refusal says which ring raised it.
+
+    Both boundaries route through one predicate, so the context string is the
+    only thing distinguishing them — and it said `RnsRing` on both sides until
+    the two rings became two classes.
+    """
+    ref, dev = rings
+    bad = np.array([[q] * _D for q in _Q_MODULI], dtype=np.uint64)
+    with pytest.raises(ValueError, match="HostRnsRing.add"):
+        ref.add(bad, bad)
+    with pytest.raises(ValueError, match="RnsRing.from_host"):
+        dev.from_host(bad)
+
+
 def test_from_signed_agrees_with_the_reference(rings) -> None:
     ref, dev = rings
     rnd = random.Random(8)

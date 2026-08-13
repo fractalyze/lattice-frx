@@ -65,6 +65,7 @@ import numpy as np
 import zk_dtypes
 from frx import lax
 
+from lattice_frx.canonical import require_canonical
 from lattice_frx.roots import bit_reverse, prime_factors, primitive_root
 
 # An RNS element: one `[d]` field array per limb, in `q_moduli` order. A tuple
@@ -102,14 +103,24 @@ class RnsRing:
     def from_host(self, arr: np.ndarray) -> RnsElement:
         """The host contract's `(limbs, d)` uint64 array as an element.
 
-        The reduction happens in Python-int precision before the cast, because
-        a residue at these widths cannot be reduced after landing in a lane.
+        `arr` is a host array, so the host predicate is what guards it — this
+        ring has no predicate of its own, and `canonical.py` says why. The check
+        belongs here rather than deeper in: past this line the residues are in
+        field arrays, where an out-of-range value is unrepresentable and the
+        question can no longer be asked.
+
+        Enforcing rather than reducing is what keeps the two rings agreeing on
+        rejection as well as on values. `HostRnsRing._coerce` raises on a
+        non-canonical array; silently taking `% q` here would accept the same
+        input and correct it, so a caller whose residues had drifted would see
+        an exception on one ring and a quietly different answer on the other.
         """
+        require_canonical(arr, self.q_moduli, "RnsRing.from_host")
         return tuple(
             fnp.asarray(
-                np.array([int(v) % q for v in arr[i]], dtype=np.uint64).astype(field)
+                np.array([int(v) for v in arr[i]], dtype=np.uint64).astype(field)
             )
-            for i, (q, field) in enumerate(zip(self.q_moduli, self.fields))
+            for i, field in enumerate(self.fields)
         )
 
     def to_host(self, a: RnsElement) -> np.ndarray:

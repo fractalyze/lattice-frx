@@ -50,8 +50,10 @@ truncates every limb above `2**32` without raising; with
 `MAX_MODULUS_BITS = 50` that is every limb this ring is built for. The
 width a traced backend can actually carry comes from a field dtype, whose
 storage follows its modulus (`zk_dtypes.prime_field(q)` mints a 64-bit
-field at a 50-bit `q`), not from an integer lane. See issue #1 for the
-measurement and for what the traced contract has to become.
+field at a 50-bit `q`), not from an integer lane. `ring.py` is that
+backend and carries the measurement; `RnsRing.from_host` is where an
+array under this contract crosses into it, and it enforces this contract
+there rather than assuming it.
 
 Lattigo functions ported here:
 
@@ -232,7 +234,7 @@ class HostRnsRing:
         converted into an object-dtype array of exact Python ints for the
         internal math.
         """
-        require_canonical(a, self.q_moduli, f"RnsRing.{op}")
+        require_canonical(a, self.q_moduli, f"HostRnsRing.{op}")
         return a.astype(object)
 
     def _reduce(self, arr: np.ndarray) -> np.ndarray:
