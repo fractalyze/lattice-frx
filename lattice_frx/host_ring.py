@@ -232,7 +232,7 @@ class HostRnsRing:
         converted into an object-dtype array of exact Python ints for the
         internal math.
         """
-        require_canonical(a, self.q_moduli, f"RnsRing.{op}")
+        require_canonical(a, self.q_moduli, f"HostRnsRing.{op}")
         return a.astype(object)
 
     def _reduce(self, arr: np.ndarray) -> np.ndarray:
