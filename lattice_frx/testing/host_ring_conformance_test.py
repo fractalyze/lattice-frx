@@ -6,9 +6,9 @@ cannot, since a field dtype is per-modulus and its element is therefore one
 array per limb rather than one `(limbs, d)` uint64 array. Its own conformance
 is `ring_test.py`, which pins it against this one op for op. What is parameterized here is any future backend that does speak
 the host contract. For each such backend this module asserts the properties
-ANY correct backend implementing the public contract (`_lattice/ring.py`'s module docstring: `(limbs, d)`
-`dtype=np.uint64` arrays of canonical, `< q_l`-per-limb, standard-form
-residues) must satisfy:
+ANY correct backend implementing the public contract (`host_ring.py`'s
+module docstring: `(limbs, d)` `dtype=np.uint64` arrays of canonical,
+`< q_l`-per-limb, standard-form residues) must satisfy:
 
 (a) dtype/shape per the documented contract (including the two
     documented deviations -- `to_balanced_limb0` returns `int64`,
@@ -26,14 +26,16 @@ residues) must satisfy:
 (e) the `TypeError` contract: float and the retired `object`
     migration-shim dtype both fail loud, across the whole op surface.
 
-This module intentionally does NOT re-litigate golden-vector fidelity
-(`test_ring.py`'s `test_ntt_matches_lattigo_order`) or RNS-specific
-CRT/centering edge cases (`test_rns.py`) -- those pin the reference
-backend's own internals against lattigo. This module pins the
-backend-agnostic *contract* every backend must share, kept lean: one
-test per property above, looping internally over every public `RnsRing`
-op and the `rns` boundary ops, rather than exploding into a
-`pytest.mark.parametrize` matrix of op x backend x property.
+This module intentionally does NOT re-litigate golden-vector fidelity or
+RNS-specific CRT/centering edge cases (`rns_test.py`) -- those pin the
+reference backend's own internals against lattigo. The golden is not here
+at all: it is keyed to one reference at one moduli chain, so it belongs to
+the consumer that derives them, and the consumer's cross-verification on a
+pin bump is the gate for it. This module pins the backend-agnostic
+*contract* every backend must share, kept lean: one test per property
+above, looping internally over every public `HostRnsRing` op and the `rns`
+boundary ops, rather than exploding into a `pytest.mark.parametrize`
+matrix of op x backend x property.
 """
 import random
 

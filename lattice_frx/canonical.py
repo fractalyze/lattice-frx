@@ -1,12 +1,17 @@
-"""The array contract: `dtype=np.uint64`, every residue `< q_l`.
+"""The **host** array contract: `dtype=np.uint64`, every residue `< q_l`.
 
 This is the one place that says what "canonical" means for the
-`(limbs, d)` arrays every module here takes and returns. `ring.py`'s
+`(limbs, d)` arrays the host side takes and returns. `host_ring.py`'s
 module docstring states the contract in prose ("Public contract: ...
 `dtype=np.uint64` numpy arrays of canonical (`< q_l` per limb)
 standard-form residues"); the predicates below are that sentence in
 code, and every enforcement site calls one of them rather than
 re-deriving the comparison.
+
+There are two rings and only one of them has this contract. `ring.py`'s
+element is a tuple of per-limb field arrays and is described there, not
+here — so this module is not the single definition of "the array
+contract" any more, it is the single definition of the *host* one.
 
 Two shapes, because callers need two different answers:
 
@@ -22,15 +27,25 @@ Two shapes, because callers need two different answers:
   operation; an out-of-range residue is a value that skipped a
   reduction. Collapsing them into one exception type loses that.
 
-This is a host contract, and `uint64` is not the device-shaped one it
-resembles: frx runs without x64, so `fnp.asarray` narrows it to `uint32` and
-truncates any residue above `2**32` silently, which at
-`primes.MAX_MODULUS_BITS = 50` is every limb the package targets. A
-traced contract carries its width in a field dtype instead
-(`zk_dtypes.prime_field(q)`), and since that dtype is per-modulus it
-cannot be one array across limbs of different `q_l` — so the traced form
-of this contract is per-limb, not `(limbs, d)`. Issue #1 carries the
-measurement and the migration.
+`uint64` is not the device-shaped contract it resembles: frx runs without
+x64, so `fnp.asarray` narrows it to `uint32` and truncates any residue
+above `2**32` silently, which at `primes.MAX_MODULUS_BITS = 50` is every
+limb the package targets. A traced contract carries its width in a field
+dtype instead (`zk_dtypes.prime_field(q)`), and since that dtype is
+per-modulus it cannot be one array across limbs of different `q_l` — so
+the traced form is per-limb, not `(limbs, d)`. That is `ring.py`, which
+holds the measurement.
+
+**There is no traced counterpart to these predicates, deliberately.**
+Neither half of the contract survives the crossing as something worth
+asking: a `prime_field(q)` array reduces internally, so an out-of-range
+residue is unrepresentable rather than invalid, and the dtype half is
+static metadata the opcode already rejects. What is left is the boundary
+where a host array becomes an element, and the array there is still a
+host array — so `RnsRing.from_host` calls `require_canonical` and the
+traced ring adds nothing of its own. Keeping the check at that seam is
+what makes the two rings refuse the same inputs and not merely agree on
+the values they accept.
 
 The dtype rule is deliberately strict — no "close enough" integer dtype
 is accepted. A signed array carrying the same values wraps on the first
@@ -89,8 +104,10 @@ def require_canonical(arr: np.ndarray, q_moduli, context: str) -> None:
     """`is_canonical`, raising instead of returning — the boundary check
     at the head of an operation that is about to assume the contract.
 
-    `context` names the failing operation (`"RnsRing.ntt"`,
-    `"rns.reconstruct_centered"`) and is prefixed to the message, so the
+    `context` names the failing operation (`"HostRnsRing.ntt"`,
+    `"RnsRing.from_host"`, `"rns.reconstruct_centered"`) and is prefixed
+    to the message. Both rings reach this predicate, so the context is
+    the only thing saying which one refused — name the class, so the
     raise points at the call the caller made rather than at this module.
     """
     if arr.dtype != _CONTRACT_DTYPE:

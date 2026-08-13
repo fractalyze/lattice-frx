@@ -1,13 +1,13 @@
-"""Tests for `lattice_frx.canonical` — the array contract every
-`_lattice` module enforces, exercised directly rather than through a ring
-or reconstruction op.
+"""Tests for `lattice_frx.canonical` — the host array contract, exercised
+directly rather than through a ring or reconstruction op.
 
-`tests/test_ring.py` and `tests/test_rns.py` already cover the contract as
-their callers see it. This file covers the predicates themselves, because
-they are what leaves for lattice-frx: a consumer that never builds an
-`RnsRing` still has to be able to ask "does this array satisfy the
-contract?" and get the same answer, and the two failure modes have to stay
-distinguishable by exception type.
+`host_ring_conformance_test.py` and `rns_test.py` already cover the
+contract as their callers see it, and `ring_test.py` covers the one seam
+where the traced ring takes a host array. This file covers the predicates
+themselves, because they are what a consumer gets on their own: one that
+never builds a ring still has to be able to ask "does this array satisfy
+the contract?" and get the same answer, and the two failure modes have to
+stay distinguishable by exception type.
 """
 import numpy as np
 import pytest
@@ -65,8 +65,8 @@ def test_context_is_prefixed_to_the_message():
     """Callers pass their own operation name so the raise points at the
     call the caller made, not at this module."""
     a = np.zeros((2, 3), dtype=np.int64)
-    with pytest.raises(TypeError, match=r"^RnsRing\.ntt: "):
-        canonical.require_canonical(a, Q_MODULI, "RnsRing.ntt")
+    with pytest.raises(TypeError, match=r"^HostRnsRing\.ntt: "):
+        canonical.require_canonical(a, Q_MODULI, "HostRnsRing.ntt")
 
 
 def test_extra_leading_axes_are_checked():

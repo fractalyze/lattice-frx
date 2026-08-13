@@ -29,11 +29,22 @@ each module is here, and where the repo sits relative to the other
   every boundary check, and was still unusable by the second consumer,
   which silently reimplemented it instead. That failure mode is invisible
   to an import-graph check, so it has to be a review habit.
-- **The array contract has one definition**, in `canonical.py`
+- **The host array contract has one definition**, in `canonical.py`
   (`is_canonical` to ask, `require_canonical` to enforce): `dtype=uint64`,
   every residue below its own limb's modulus. Call it; never re-hand-write
   the comparison. Keep the two failure modes distinct — `TypeError` for
-  dtype, `ValueError` for range — they are different caller bugs.
+  dtype, `ValueError` for range — they are different caller bugs. It is the
+  *host* contract only: `ring.py`'s element is a tuple of per-limb field
+  arrays and states its own contract, so don't read `canonical.py` as
+  defining both.
+- **There is no traced predicate, and the seam is why.** A field dtype
+  reduces internally, so an out-of-range residue is unrepresentable rather
+  than invalid, and the dtype half is static metadata the opcode rejects on
+  its own — a traced `require_canonical` would have one vacuous half and one
+  redundant one. The check that does earn its place is at
+  `RnsRing.from_host`, where the array is still a host array. Enforce there,
+  and pass the *class* as the context: both rings reach the one predicate,
+  so `HostRnsRing.add` vs `RnsRing.from_host` is all that says which refused.
 - **The `uint64` contract is a HOST contract, not a device-shaped one**,
   however much it looks like one. frx runs without x64, so `fnp.asarray`
   narrows `uint64` to `uint32` and truncates every limb above `2**32`
