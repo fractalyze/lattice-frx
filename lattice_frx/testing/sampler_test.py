@@ -355,3 +355,108 @@ def test_uniform_from_bytes_rejects_a_non_byte_buffer():
     needed = sampler.uniform_bytes_needed(count, q)
     with pytest.raises(TypeError, match="uint8"):
         sampler.uniform_from_bytes(np.zeros(needed, dtype=np.uint32), q, count)
+
+
+def test_fixed_weight_ternary_weight_support_and_determinism():
+    weight, degree = 39, 64
+    data = _stream(sampler.fixed_weight_ternary_bytes_needed(weight, degree), seed=17)
+    c = sampler.fixed_weight_ternary(data, weight, degree)
+    assert c.dtype == np.int64 and c.shape == (degree,)
+    assert int(np.count_nonzero(c)) == weight
+    assert set(np.unique(c)).issubset({-1, 0, 1})
+    np.testing.assert_array_equal(sampler.fixed_weight_ternary(data, weight, degree), c)
+
+
+def test_fixed_weight_ternary_position_marginals_chi_square():
+    # Each draw's support is a weight-subset of the positions, so per-position
+    # counts over n draws have mean n*weight/degree with *negative* cross-
+    # position correlation — Pearson's statistic against the multinomial
+    # reference is conservative here (its true variance is smaller), which is
+    # the safe direction for a p > 1e-6 gate.
+    weight, degree, n = 13, 32, 20_000
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    counts = np.zeros(degree, dtype=np.int64)
+    for k in range(n):
+        counts += sampler.fixed_weight_ternary(_stream(needed, 100_000 + k), weight, degree) != 0
+    assert counts.sum() == n * weight
+    assert stats.chisquare(counts).pvalue > 1e-6
+
+
+def test_fixed_weight_ternary_sign_balance_and_position_independence():
+    weight, degree, n = 13, 32, 20_000
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    plus = np.zeros(degree, dtype=np.int64)
+    minus = np.zeros(degree, dtype=np.int64)
+    for k in range(n):
+        c = sampler.fixed_weight_ternary(_stream(needed, 200_000 + k), weight, degree)
+        plus += c == 1
+        minus += c == -1
+    assert stats.binomtest(int(plus.sum()), int(plus.sum() + minus.sum()), 0.5).pvalue > 1e-6
+    # Sign must not depend on where the coefficient landed.
+    assert stats.chi2_contingency(np.vstack([plus, minus])).pvalue > 1e-6
+
+
+def test_fixed_weight_ternary_bytes_needed_budget_is_minimal():
+    # Independent recomputation of the per-position rejection probabilities
+    # and the union bound the round budget is derived from.
+    from fractions import Fraction
+
+    weight, degree, fail_prob = 39, 64, 2.0**-128
+
+    def union_bound(rounds: int) -> Fraction:
+        total = Fraction(0)
+        for m in range(degree - weight + 1, degree + 1):
+            largest_multiple = (1 << 64) // m * m
+            total += Fraction((1 << 64) - largest_multiple, 1 << 64) ** rounds
+        return total
+
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree, fail_prob)
+    sign_bytes = (weight + 7) // 8
+    assert (needed - sign_bytes) % (8 * weight) == 0
+    rounds = (needed - sign_bytes) // (8 * weight)
+    assert union_bound(rounds) <= Fraction(fail_prob)
+    assert rounds == 1 or union_bound(rounds - 1) > Fraction(fail_prob)
+
+
+def test_fixed_weight_ternary_needs_one_round_when_no_position_can_reject():
+    # degree=8, weight=1 puts the single Fisher-Yates draw at modulus 8,
+    # which divides 2**64 — no rejection region, so exactly one chunk plus
+    # one sign byte.
+    assert sampler.fixed_weight_ternary_bytes_needed(1, 8) == 8 + 1
+
+
+def test_fixed_weight_ternary_signs_live_in_the_trailing_bytes():
+    # Flipping only the sign bytes must preserve the support and flip signs —
+    # this pins the stream layout (position chunks first, sign bits last).
+    weight, degree = 5, 16
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    sign_bytes = (weight + 7) // 8
+    data = _stream(needed, 23)
+    flipped = data[:-sign_bytes] + bytes(b ^ 0xFF for b in data[-sign_bytes:])
+    a = sampler.fixed_weight_ternary(data, weight, degree)
+    b = sampler.fixed_weight_ternary(flipped, weight, degree)
+    np.testing.assert_array_equal(a != 0, b != 0)
+    np.testing.assert_array_equal(a[a != 0], -b[b != 0])
+
+
+def test_fixed_weight_ternary_requires_the_exact_byte_count():
+    weight, degree = 5, 16
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    for n_bytes in (needed - 1, needed + 1):
+        with pytest.raises(ValueError, match="bytes"):
+            sampler.fixed_weight_ternary(_stream(n_bytes, 3), weight, degree)
+
+
+def test_fixed_weight_ternary_raises_when_a_position_rejects_its_whole_budget():
+    # weight=2, degree=10 puts the draws at moduli 9 and 10, neither of which
+    # divides 2**64 — so all-0xff chunks land in every rejection region.
+    weight, degree = 2, 10
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    with pytest.raises(RuntimeError, match="fixed_weight_ternary"):
+        sampler.fixed_weight_ternary(b"\xff" * needed, weight, degree)
+
+
+@pytest.mark.parametrize("weight,degree", [(0, 8), (-1, 8), (9, 8)])
+def test_fixed_weight_ternary_rejects_a_bad_weight(weight, degree):
+    with pytest.raises(ValueError, match="weight"):
+        sampler.fixed_weight_ternary_bytes_needed(weight, degree)

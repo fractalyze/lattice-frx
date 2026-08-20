@@ -63,6 +63,7 @@ ndarray — under one contract:
   choice, exactly as `rng` is for the Gaussian tier.
 """
 import math
+from fractions import Fraction
 
 import numpy as np
 
@@ -424,3 +425,92 @@ def uniform_from_bytes(data, modulus: int, count: int, fail_prob: float = 2.0**-
             f"(or a caller's slicing), not bad luck."
         )
     return accepted[:count] % np.uint64(modulus)
+
+
+def _ternary_rounds(weight: int, degree: int, fail_prob: float) -> int:
+    """The minimal per-position candidate count `rounds` such that a
+    `fixed_weight_ternary` draw fails (some position rejects every one of
+    its candidates) with probability at most `fail_prob`.
+
+    Position `idx` draws uniformly from a modulus `m = degree - weight +
+    1 + idx`, rejecting a chunk with probability `p_m = (2**64 mod m) /
+    2**64`; the failure bound is the union over positions `sum_m p_m **
+    rounds` (an upper bound on the exact `1 - prod(1 - p_m**rounds)`).
+    Every `p_m` is an exact binary rational, and `rounds` stays tiny, so
+    this is evaluated in exact `Fraction` arithmetic — unlike the
+    log-space evaluation `uniform_bytes_needed`'s far larger budgets
+    force."""
+    eps = Fraction(fail_prob)
+    ps = []
+    for m in range(degree - weight + 1, degree + 1):
+        largest_multiple = _TWO_64 // m * m
+        ps.append(Fraction(_TWO_64 - largest_multiple, _TWO_64))
+    rounds = 1
+    while sum(p**rounds for p in ps) > eps:
+        rounds += 1
+    return rounds
+
+
+def _validate_ternary_params(weight: int, degree: int, fail_prob: float) -> None:
+    if degree < 1:
+        raise ValueError(f"degree must be positive, got {degree!r}")
+    if not 1 <= weight <= degree:
+        raise ValueError(f"weight must be in [1, degree], got weight={weight!r} at degree={degree!r}")
+    if not 0.0 < fail_prob < 1.0:
+        raise ValueError(f"fail_prob must be in (0, 1), got {fail_prob!r}")
+
+
+def fixed_weight_ternary_bytes_needed(weight: int, degree: int, fail_prob: float = 2.0**-128) -> int:
+    """The exact byte count `fixed_weight_ternary` consumes: `8 * weight *
+    rounds` position-candidate chunks (see `_ternary_rounds`) followed by
+    `ceil(weight / 8)` sign bytes."""
+    _validate_ternary_params(weight, degree, fail_prob)
+    return 8 * weight * _ternary_rounds(weight, degree, fail_prob) + (weight + 7) // 8
+
+
+def fixed_weight_ternary(data, weight: int, degree: int, fail_prob: float = 2.0**-128) -> np.ndarray:
+    """A degree-`degree` coefficient vector with exactly `weight` nonzero
+    entries, each in `{-1, +1}`, as a deterministic function of the injected
+    byte stream — the fixed-weight challenge set every Fiat-Shamir lattice
+    proof draws from. SampleInBall-shaped (FIPS 204 §7.3): a partial
+    Fisher-Yates walk over positions `degree - weight .. degree - 1`, where
+    step `i` swaps `coeffs[i] <- coeffs[j]` for a uniform `j in [0, i]` and
+    plants a sign at `j` — which puts a uniformly random `weight`-subset in
+    the support with independent fair signs.
+
+    Stream layout (after the module docstring's chunk convention): first a
+    `weight x rounds` block of candidate chunks, position-major — step `i`
+    owns `rounds` consecutive chunks and takes the first that survives the
+    same no-modulo-bias rejection `uniform_from_bytes` applies, at modulus
+    `i + 1` — then `ceil(weight / 8)` sign bytes, consumed LSB-first, one
+    bit per step in position order, bit `b` giving sign `(-1)**b` (FIPS
+    204's convention: a set bit means -1)."""
+    needed = fixed_weight_ternary_bytes_needed(weight, degree, fail_prob)  # validates params
+    buf = _require_byte_stream(data, needed, "fixed_weight_ternary")
+
+    sign_byte_count = (weight + 7) // 8
+    rounds = (needed - sign_byte_count) // (8 * weight)
+    chunks = buf[: 8 * weight * rounds].view(np.dtype("<u8")).reshape(weight, rounds)
+    sign_bits = np.unpackbits(buf[8 * weight * rounds:], bitorder="little")[:weight]
+    signs = np.where(sign_bits == 1, -1, 1).astype(np.int64)
+
+    coeffs = np.zeros(degree, dtype=np.int64)
+    for idx, i in enumerate(range(degree - weight, degree)):
+        modulus = i + 1
+        largest_multiple = _TWO_64 // modulus * modulus
+        candidates = chunks[idx]
+        if largest_multiple == _TWO_64:
+            j = int(candidates[0]) % modulus
+        else:
+            accepted = candidates < np.uint64(largest_multiple)
+            if not accepted.any():
+                raise RuntimeError(
+                    f"fixed_weight_ternary: position {i} rejected all {rounds} of "
+                    f"its candidate chunks — on honestly random bytes the whole "
+                    f"draw fails with probability <= {fail_prob!r}, so suspect the "
+                    "stream (or a caller's slicing), not bad luck."
+                )
+            j = int(candidates[np.argmax(accepted)]) % modulus
+        coeffs[i] = coeffs[j]
+        coeffs[j] = signs[idx]
+    return coeffs
