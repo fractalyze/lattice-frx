@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from lattice_frx import host_ring as host_mod
+from lattice_frx import roots as roots_mod
 from lattice_frx import ring as ring_mod
 
 # NTT-friendly, 36-bit, and `1 mod 2d` at d=256.
@@ -295,3 +296,21 @@ def test_galois_by_hand_at_a_tiny_ring() -> None:
     assert np.array_equal(ref.galois(x, 3), ref.from_signed([0, 0, 0, 1]))
     x_sq = ref.from_signed([0, 0, 1, 0])
     assert np.array_equal(ref.galois(x_sq, 3), ref.from_signed([0, 0, -1, 0]))
+
+
+def test_slot_exponents_match_the_oracle(rings) -> None:
+    """The closed form `e(j) = 2·brv(j) + 1` re-derived from the host ring,
+    per limb: the slot values of `ntt(X)` are the roots themselves, so a
+    discrete log base `ψ` reads the exponent table off the pinned order.
+    This is the insurance that `roots.slot_exponents` and the order contract
+    never drift apart — and that one modulus-free table serves every limb."""
+    ref, _ = rings
+    want = roots_mod.slot_exponents(_D)
+    mono = np.zeros((len(_Q_MODULI), _D), dtype=np.uint64)
+    mono[:, 1] = 1
+    slots = ref.ntt(mono)
+    for limb, q in enumerate(_Q_MODULI):
+        generator = roots_mod.primitive_root(q, roots_mod.prime_factors(q - 1))
+        psi = pow(generator, (q - 1) // (2 * _D), q)
+        dlog = {pow(psi, t, q): t for t in range(2 * _D)}
+        assert [dlog[int(v)] for v in slots[limb]] == want

@@ -277,11 +277,10 @@ class HostRnsRing:
         return self._reduce(-a)
 
     def galois(self, a: np.ndarray, k: int) -> np.ndarray:
-        """`σ_k : X ↦ X^k` (odd `k`, reduced mod `2d`), one coefficient at a
-        time: `a_i` lands at `i·k mod 2d` folded into `[0, d)`, negated when
-        the fold crosses `d` (`X^d = -1`). Coefficient-domain by definition;
-        the NTT-domain action lives on the traced ring as `galois_eval`,
-        derived against this oracle."""
+        """`roots.galois_map`'s action, one coefficient at a time.
+
+        Coefficient-domain by definition; the NTT-domain action lives on the
+        traced ring as `galois_eval`, checked against this oracle."""
         a = self._coerce(a, "galois")
         dest, negate = galois_map(self.d, k)
         out = np.zeros_like(a)

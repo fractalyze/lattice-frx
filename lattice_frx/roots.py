@@ -1,11 +1,12 @@
-"""The constants an NTT over a modulus needs, before any ring exists.
+"""The host-side integer structure both rings need identically.
 
-A primitive root of `q` and the bit-reversal its twiddle table is indexed by
-are needed identically by both rings here — the host one fills lattigo's tables
-with them, the traced one derives the opcode's generator and its ordering
-adapter from them — and neither is about a ring, a limb, or an array. They are
-host-side integer functions over a modulus, computed once per parameterisation,
-so they live below both rather than inside either.
+A primitive root of `q`, the bit-reversal its twiddle table is indexed by,
+and the index maps of the ring's own symmetries (`galois_map`,
+`slot_exponents`) — the host ring fills lattigo's tables and loops with
+them, the traced one derives the opcode's generator, its ordering adapter,
+and its gather tables from them. None of it is about a limb or an array:
+host-side integer functions, computed once per parameterisation, living
+below both rings rather than inside either.
 
 `primitive_root` is lattigo's `PrimitiveRoot` (subring.go): the smallest `g`
 with `g^((q-1)/f) != 1 mod q` for every prime factor `f` of `q-1`. Its
@@ -119,3 +120,19 @@ def galois_map(d: int, k: int) -> tuple[list[int], list[bool]]:
         dest.append(j - d if j >= d else j)
         negate.append(j >= d)
     return dest, negate
+
+
+def slot_exponents(d: int) -> list[int]:
+    """`e(j)` for every NTT slot of the contract's (lattigo's) order: slot
+    `j` of a forward transform holds the evaluation at `ψ^{e(j)}`, with
+    `e(j) = 2·brv(j) + 1`.
+
+    The formula is the bit-reversed enumeration of the odd exponents —
+    exactly the walk the twiddle table takes — and it is not trusted on
+    inspection: `ring_test` re-derives the table numerically (the monomial
+    `X` through the host ring, discrete logs base `ψ`) and requires
+    equality. Modulus-free on purpose: the order is index-structural, which
+    is why one table serves every limb.
+    """
+    bits = (d - 1).bit_length()
+    return [2 * bit_reverse(j, bits) + 1 for j in range(d)]
