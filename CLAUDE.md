@@ -59,7 +59,10 @@ each module is here, and where the repo sits relative to the other
   `ring.py` carries and `host_ring.py` does not. Do not write "device-shaped"
   about the `uint64` contract, and do not assume `np` → `fnp` is the
   migration.
-- **Tests are property-based** (`lattice_frx/testing/*_test.py`). A golden
+- **Tests are property-based and absltest-based**
+  (`lattice_frx/testing/*_test.py`, on `absl.testing`'s `absltest` /
+  `parameterized` — not pytest; every file ends in an `absltest.main()`
+  guard so a plain `py_test` runs it). A golden
   keyed to a *specific* reference at a *specific* moduli chain belongs to
   the consumer that derives those moduli — it tests "my dependency behaves
   correctly at my parameters". Don't pull one in here.

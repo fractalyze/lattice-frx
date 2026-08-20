@@ -178,7 +178,7 @@ than reused.
 ```bash
 python3.11 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest
+.venv/bin/python -m unittest discover -s lattice_frx/testing -t . -p '*_test.py'
 ```
 
 Or hermetically via Bazel — provisions its own Python 3.11 toolchain and
@@ -213,6 +213,11 @@ The suite is property-based: CRT round-trips including negatives, the
 centering boundary, fast-path/slow-path agreement, NTT round-trips,
 no-mutation-of-inputs across every public op, the contract's two failure
 modes, and distribution checks for each sampler tier.
+
+It is written on `absl.testing` (`absltest` + `parameterized`); every
+`*_test.py` carries its own `absltest.main()` guard, so a file runs
+directly, under Bazel's plain `py_test`, or through stdlib `unittest`
+discovery — the three commands above are the same suite.
 
 Golden-vector conformance against a *specific* reference at a *specific*
 moduli chain belongs to the consumer that derives those moduli — it is a

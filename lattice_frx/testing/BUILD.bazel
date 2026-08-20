@@ -1,31 +1,37 @@
-load("//tools:pytest_test.bzl", "pytest_test")
+load("@lattice_frx_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_test")
 
 # Test-only package: excluded from the wheel (see pyproject.toml). Each file
-# is its own py_test routed through tools/pytest_main.py — a bare py_test on a
-# pytest-style file collects nothing and passes vacuously.
-pytest_test(
+# is its own py_test; the suite is absltest-based, so every file carries its
+# own `absltest.main()` guard and a plain py_test runs it directly.
+py_test(
     name = "canonical_test",
     size = "small",
     srcs = ["canonical_test.py"],
     deps = [
         "//lattice_frx",
+        requirement("absl-py"),
         "@lattice_frx_pip//numpy",
     ],
 )
 
-pytest_test(
+py_test(
     name = "gadget_test",
     size = "small",
     srcs = ["gadget_test.py"],
-    deps = ["//lattice_frx"],
+    deps = [
+        "//lattice_frx",
+        requirement("absl-py"),
+    ],
 )
 
-pytest_test(
+py_test(
     name = "host_ring_conformance_test",
     size = "small",
     srcs = ["host_ring_conformance_test.py"],
     deps = [
         "//lattice_frx",
+        requirement("absl-py"),
         "@lattice_frx_pip//numpy",
     ],
 )
@@ -34,44 +40,48 @@ pytest_test(
 # `frx`/`zk_dtypes` come in here because the ring under test is made of them;
 # the host side it is checked against stays numpy-only, which is what makes it
 # an independent check rather than a restatement.
-pytest_test(
+py_test(
     name = "ring_test",
     size = "medium",
     srcs = ["ring_test.py"],
     deps = [
         "//lattice_frx",
+        requirement("absl-py"),
         "@lattice_frx_pip//frx",
         "@lattice_frx_pip//numpy",
         "@lattice_frx_pip//zk_dtypes",
     ],
 )
 
-pytest_test(
+py_test(
     name = "norms_test",
     size = "small",
     srcs = ["norms_test.py"],
     deps = [
         "//lattice_frx",
+        requirement("absl-py"),
         "@lattice_frx_pip//numpy",
     ],
 )
 
-pytest_test(
+py_test(
     name = "rns_test",
     size = "small",
     srcs = ["rns_test.py"],
     deps = [
         "//lattice_frx",
+        requirement("absl-py"),
         "@lattice_frx_pip//numpy",
     ],
 )
 
-pytest_test(
+py_test(
     name = "sampler_test",
     size = "medium",
     srcs = ["sampler_test.py"],
     deps = [
         "//lattice_frx",
+        requirement("absl-py"),
         "@lattice_frx_pip//numpy",
         "@lattice_frx_pip//scipy",
     ],

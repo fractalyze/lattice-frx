@@ -1,4 +1,0 @@
-exports_files(
-    ["pytest_main.py"],
-    visibility = ["//lattice_frx/testing:__pkg__"],
-)
