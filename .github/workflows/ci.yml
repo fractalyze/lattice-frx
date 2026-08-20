@@ -39,7 +39,7 @@ jobs:
           -- //...
 
       # Capture the runner-local test.log a failed test leaves behind — the CI
-      # stream only carries the FAIL summary, not the pytest output.
+      # stream only carries the FAIL summary, not the test output.
       - name: Upload bazel test logs
         if: ${{ failure() }}
         uses: fractalyze/.github/.github/actions/upload-bazel-testlogs@main
@@ -47,8 +47,9 @@ jobs:
           name: bazel-test-logs
 
   # The pip path the README documents, kept honest: `pip install -e '.[dev]'`
-  # plus a bare `pytest` has to work without Bazel, since that is how a
-  # consumer evaluating the package will first run it.
+  # plus a stdlib unittest discovery run has to work without Bazel, since that
+  # is how a consumer evaluating the package will first run the suite (the
+  # absltest cases are unittest-compatible).
   pip-test:
     runs-on: ubuntu-latest
     steps:
@@ -60,8 +61,8 @@ jobs:
         # frx / frxlib live on the Fractalyze index, not PyPI.
         run: |
           python -m pip install --extra-index-url=https://fractalyze.github.io/pypi/simple/ -e '.[dev]'
-      - name: Run pytest
-        run: pytest -q
+      - name: Run the test suite
+        run: python -m unittest discover -s lattice_frx/testing -t . -p '*_test.py' -b
 
   # This package must not grow a dependency on a *scheme* repo: enc-frx and
   # sig-frx each carry a lattice scheme, so a dependency in that direction

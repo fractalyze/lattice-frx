@@ -18,7 +18,8 @@ synthetically.
 import math
 
 import numpy as np
-import pytest
+from absl.testing import absltest
+from absl.testing import parameterized
 from scipy import stats
 
 from lattice_frx import sampler
@@ -74,177 +75,170 @@ def _chi_square_vs_true_gaussian(samples: np.ndarray, center: float, sigma: floa
     return stats.chisquare(observed, expected)
 
 
-def test_discrete_gaussian_window_matches_brief_formula():
-    # "round(c) ± ceil(tail_cut*sigma)+1" (task-10-brief.md) => a window of
-    # 2*(ceil(tail_cut*sigma)+1)+1 candidate integers per center.
-    rng = np.random.default_rng(0)
-    sigma, tail_cut = 5.0, 5.0
-    k = math.ceil(tail_cut * sigma) + 1
-    samples = sampler.discrete_gaussian(rng, np.array([0.0]), sigma, tail_cut=tail_cut)
-    assert samples.shape == (1,)
-    # A single draw always lands inside the explicit window.
-    assert abs(int(samples[0])) <= k
+class GaussianSamplerTest(parameterized.TestCase):
 
-
-@pytest.mark.parametrize("center", [0.0, 0.37])
-def test_discrete_gaussian_chi_square(center):
-    rng = np.random.default_rng(1234)
-    sigma, n = 5.0, 200_000
-    samples = sampler.discrete_gaussian(rng, np.full(n, center), sigma)
-    chi2 = _chi_square_vs_true_gaussian(samples, center, sigma)
-    assert chi2.pvalue > 1e-6
-
-
-@pytest.mark.parametrize("sigma", [30.0, 200.0])
-@pytest.mark.parametrize("center", [0.0, 0.37])
-def test_rejection_gaussian_chi_square(sigma, center):
-    rng = np.random.default_rng(int(sigma) * 1000 + 7)
-    n = 200_000
-    samples = sampler.rejection_gaussian(rng, np.full(n, center), sigma)
-    chi2 = _chi_square_vs_true_gaussian(samples, center, sigma)
-    assert chi2.pvalue > 1e-6
-
-
-@pytest.mark.parametrize("center", [0.0, 0.37])
-def test_rejection_gaussian_cross_checks_against_discrete_gaussian(center):
-    # Two independently-implemented exact samplers (finite-support inversion
-    # vs. Laplace-proposal rejection) agreeing on their sample distribution
-    # is the strongest fidelity check available without a closed-form
-    # reference -- run at sigma=30, where both tiers are actually usable
-    # (discrete_gaussian's window is 2*151+1=303, well under the 4096 cap).
-    #
-    # This compares two *samples* to each other, not a sample against a
-    # fixed/exact model (unlike `_chi_square_vs_true_gaussian`), so
-    # `stats.chisquare` is the wrong tool: it treats `f_exp` as exact,
-    # zero-variance probabilities, but a same-size random sample used as
-    # `f_exp` carries its own sampling variance, understating the null's
-    # true variance and biasing toward spuriously tiny p-values.
-    # `chi2_contingency`'s homogeneity test on a 2xB contingency table
-    # accounts for both samples' variance, the correct form for "do these
-    # two independent samples come from the same distribution".
-    sigma, n = 30.0, 200_000
-    explicit = sampler.discrete_gaussian(np.random.default_rng(21), np.full(n, center), sigma)
-    rejection = sampler.rejection_gaussian(np.random.default_rng(22), np.full(n, center), sigma)
-
-    tail_cut = 8.0
-    k = math.ceil(tail_cut * sigma) + 1
-    lo, hi = int(round(center)) - k, int(round(center)) + k
-    exp_counts, exp_outside = _bin_counts(explicit, lo, hi)
-    rej_counts, rej_outside = _bin_counts(rejection, lo, hi)
-    assert exp_outside == 0 and rej_outside == 0
-
-    keep = exp_counts >= 5.0
-    table = np.vstack([exp_counts[keep], rej_counts[keep]])
-    result = stats.chi2_contingency(table)
-    assert result.pvalue > 1e-6
-
-
-def test_rejection_gaussian_mean_and_variance_sanity_at_large_sigma():
-    rng = np.random.default_rng(43)
-    sigma, n, center = 4.18e8, 100_000, 12345.6789
-    samples = sampler.rejection_gaussian(rng, np.full(n, center), sigma)
-    assert samples.shape == (n,)
-
-    mean = samples.mean()
-    var = samples.astype(np.float64).var()
-    assert abs(mean - center) < 5 * sigma / math.sqrt(n)  # standard error of the mean
-    assert abs(var - sigma * sigma) / (sigma * sigma) < 0.05
-
-
-@pytest.mark.parametrize("sigma", [30.0, 200.0, 4.18e8])
-def test_rejection_gaussian_acceptance_rate(sigma):
-    # A single (non-retried) round of the propose/accept step, so this
-    # measures the same per-round acceptance rate the K-bound derivation
-    # in rejection_gaussian's docstring claims is comfortably >= ~0.5 for
-    # these sigma (this is the module-private seam mentioned in encoder.py
-    # -- direct access is deliberate here, to inspect the mechanism the
-    # public retry loop hides).
-    rng = np.random.default_rng(int(sigma) % 997 + 1)
-    centers = rng.uniform(-1.0, 1.0, 50_000)
-    x0 = np.rint(centers)
-    k_bound = sampler._laplace_rejection_bound(sigma)
-    _, accept = sampler._laplace_rejection_round(rng, centers, x0, sigma, k_bound)
-    assert accept.mean() >= 0.4, accept.mean()
-
-
-def test_rounded_gaussian_mean_and_variance_sanity():
-    rng = np.random.default_rng(42)
-    sigma, n = 2.0**20, 200_000
-    samples = sampler.rounded_gaussian(rng, np.zeros(n), sigma)
-    assert samples.shape == (n,)
-
-    mean = samples.mean()
-    var = samples.astype(np.float64).var()
-    # Rounding to the nearest integer perturbs mean/variance by O(1),
-    # utterly negligible next to sigma=2**20 ~ 1e6.
-    assert abs(mean) < 5 * sigma / math.sqrt(n)  # standard error of the mean
-    assert abs(var - sigma * sigma) / (sigma * sigma) < 0.05
-
-
-def test_sampler_for_small_sigma_tiers_use_explicit_support():
-    for name, sigma in SMALL_SIGMA.items():
-        fn = sampler.sampler_for(sigma, SAMPLE_COUNT)
-        assert fn is sampler.discrete_gaussian, name
-
-
-def test_sampler_for_window_gate_matches_discrete_gaussian_window():
-    # The gate's window estimate and discrete_gaussian's actual allocated
-    # window must now agree exactly (fix round 1, item 3) -- not just be
-    # "close" -- so this pins the formula on both sides together instead
-    # of just re-deriving sampler_for's copy in isolation.
-    tail_cut = 5.0
-    for sigma in (4.79, 6.77, 100.0, 4095.0):
+    def test_discrete_gaussian_window_matches_brief_formula(self):
+        # "round(c) ± ceil(tail_cut*sigma)+1" (task-10-brief.md) => a window of
+        # 2*(ceil(tail_cut*sigma)+1)+1 candidate integers per center.
+        rng = np.random.default_rng(0)
+        sigma, tail_cut = 5.0, 5.0
         k = math.ceil(tail_cut * sigma) + 1
-        gate_window = 2 * (math.ceil(tail_cut * sigma) + 1) + 1
-        actual_window = 2 * k + 1
-        assert gate_window == actual_window
+        samples = sampler.discrete_gaussian(rng, np.array([0.0]), sigma, tail_cut=tail_cut)
+        self.assertEqual(samples.shape, (1,))
+        # A single draw always lands inside the explicit window.
+        self.assertLessEqual(abs(int(samples[0])), k)
 
+    @parameterized.parameters(0.0, 0.37)
+    def test_discrete_gaussian_chi_square(self, center):
+        rng = np.random.default_rng(1234)
+        sigma, n = 5.0, 200_000
+        samples = sampler.discrete_gaussian(rng, np.full(n, center), sigma)
+        chi2 = _chi_square_vs_true_gaussian(samples, center, sigma)
+        self.assertGreater(chi2.pvalue, 1e-6)
 
-def test_sampler_for_resolves_every_concrete_sigma_without_raising():
-    expected_tier = {
-        **{name: sampler.discrete_gaussian for name in SMALL_SIGMA},
-        **{name: sampler.rejection_gaussian for name in WIDE_SIGMA},
-    }
-    for name, sigma in {**SMALL_SIGMA, **WIDE_SIGMA}.items():
-        got = sampler.sampler_for(sigma, SAMPLE_COUNT)
-        assert got is expected_tier[name], (name, sigma, got)
+    @parameterized.parameters(
+        (30.0, 0.0),
+        (30.0, 0.37),
+        (200.0, 0.0),
+        (200.0, 0.37),
+    )
+    def test_rejection_gaussian_chi_square(self, sigma, center):
+        rng = np.random.default_rng(int(sigma) * 1000 + 7)
+        n = 200_000
+        samples = sampler.rejection_gaussian(rng, np.full(n, center), sigma)
+        chi2 = _chi_square_vs_true_gaussian(samples, center, sigma)
+        self.assertGreater(chi2.pvalue, 1e-6)
 
+    @parameterized.parameters(0.0, 0.37)
+    def test_rejection_gaussian_cross_checks_against_discrete_gaussian(self, center):
+        # Two independently-implemented exact samplers (finite-support inversion
+        # vs. Laplace-proposal rejection) agreeing on their sample distribution
+        # is the strongest fidelity check available without a closed-form
+        # reference -- run at sigma=30, where both tiers are actually usable
+        # (discrete_gaussian's window is 2*151+1=303, well under the 4096 cap).
+        #
+        # This compares two *samples* to each other, not a sample against a
+        # fixed/exact model (unlike `_chi_square_vs_true_gaussian`), so
+        # `stats.chisquare` is the wrong tool: it treats `f_exp` as exact,
+        # zero-variance probabilities, but a same-size random sample used as
+        # `f_exp` carries its own sampling variance, understating the null's
+        # true variance and biasing toward spuriously tiny p-values.
+        # `chi2_contingency`'s homogeneity test on a 2xB contingency table
+        # accounts for both samples' variance, the correct form for "do these
+        # two independent samples come from the same distribution".
+        sigma, n = 30.0, 200_000
+        explicit = sampler.discrete_gaussian(np.random.default_rng(21), np.full(n, center), sigma)
+        rejection = sampler.rejection_gaussian(np.random.default_rng(22), np.full(n, center), sigma)
 
-def test_rounded_tier_is_selected_in_the_large_sigma_regime():
-    """The tier no concrete parameter set above reaches: sigma wide enough
-    that the per-sample Theorem-9 distance, unioned over every draw, is
-    still below 2**-64."""
-    sigma = 2.0**50
-    assert sampler.rounded_gaussian_distance(sigma) * SAMPLE_COUNT < 2**-64
-    assert sampler.sampler_for(sigma, SAMPLE_COUNT) is sampler.rounded_gaussian
+        tail_cut = 8.0
+        k = math.ceil(tail_cut * sigma) + 1
+        lo, hi = int(round(center)) - k, int(round(center)) + k
+        exp_counts, exp_outside = _bin_counts(explicit, lo, hi)
+        rej_counts, rej_outside = _bin_counts(rejection, lo, hi)
+        self.assertEqual(exp_outside, 0)
+        self.assertEqual(rej_outside, 0)
 
+        keep = exp_counts >= 5.0
+        table = np.vstack([exp_counts[keep], rej_counts[keep]])
+        result = stats.chi2_contingency(table)
+        self.assertGreater(result.pvalue, 1e-6)
 
-def test_a_large_enough_draw_count_pushes_the_rounded_tier_to_rejection():
-    """The union bound is what the count feeds, so raising it alone must be
-    able to disqualify a sigma the smaller count admitted."""
-    sigma = 2.0**50
-    per_sample = sampler.rounded_gaussian_distance(sigma)
-    too_many = int(2**-64 / per_sample) + 1
-    assert sampler.sampler_for(sigma, too_many) is sampler.rejection_gaussian
+    def test_rejection_gaussian_mean_and_variance_sanity_at_large_sigma(self):
+        rng = np.random.default_rng(43)
+        sigma, n, center = 4.18e8, 100_000, 12345.6789
+        samples = sampler.rejection_gaussian(rng, np.full(n, center), sigma)
+        self.assertEqual(samples.shape, (n,))
 
+        mean = samples.mean()
+        var = samples.astype(np.float64).var()
+        self.assertLess(abs(mean - center), 5 * sigma / math.sqrt(n))  # standard error of the mean
+        self.assertLess(abs(var - sigma * sigma) / (sigma * sigma), 0.05)
 
-@pytest.mark.parametrize("bad_count", [0, -1])
-def test_sampler_for_rejects_a_non_positive_sample_count(bad_count):
-    with pytest.raises(ValueError, match="sample_count"):
-        sampler.sampler_for(100.0, bad_count)
+    @parameterized.parameters(30.0, 200.0, 4.18e8)
+    def test_rejection_gaussian_acceptance_rate(self, sigma):
+        # A single (non-retried) round of the propose/accept step, so this
+        # measures the same per-round acceptance rate the K-bound derivation
+        # in rejection_gaussian's docstring claims is comfortably >= ~0.5 for
+        # these sigma (this is the module-private seam mentioned in encoder.py
+        # -- direct access is deliberate here, to inspect the mechanism the
+        # public retry loop hides).
+        rng = np.random.default_rng(int(sigma) % 997 + 1)
+        centers = rng.uniform(-1.0, 1.0, 50_000)
+        x0 = np.rint(centers)
+        k_bound = sampler._laplace_rejection_bound(sigma)
+        _, accept = sampler._laplace_rejection_round(rng, centers, x0, sigma, k_bound)
+        self.assertGreaterEqual(accept.mean(), 0.4, accept.mean())
 
+    def test_rounded_gaussian_mean_and_variance_sanity(self):
+        rng = np.random.default_rng(42)
+        sigma, n = 2.0**20, 200_000
+        samples = sampler.rounded_gaussian(rng, np.zeros(n), sigma)
+        self.assertEqual(samples.shape, (n,))
 
-@pytest.mark.parametrize("sigma", [0.0, -1.0])
-def test_sampler_for_raises_only_for_degenerate_sigma(sigma):
-    with pytest.raises(ValueError, match="sigma"):
-        sampler.sampler_for(sigma, SAMPLE_COUNT)
+        mean = samples.mean()
+        var = samples.astype(np.float64).var()
+        # Rounding to the nearest integer perturbs mean/variance by O(1),
+        # utterly negligible next to sigma=2**20 ~ 1e6.
+        self.assertLess(abs(mean), 5 * sigma / math.sqrt(n))  # standard error of the mean
+        self.assertLess(abs(var - sigma * sigma) / (sigma * sigma), 0.05)
 
+    def test_sampler_for_small_sigma_tiers_use_explicit_support(self):
+        for name, sigma in SMALL_SIGMA.items():
+            fn = sampler.sampler_for(sigma, SAMPLE_COUNT)
+            self.assertIs(fn, sampler.discrete_gaussian, name)
 
-@pytest.mark.parametrize("sigma", [0.0, -1.0])
-def test_rejection_gaussian_raises_for_degenerate_sigma(sigma):
-    rng = np.random.default_rng(0)
-    with pytest.raises(ValueError, match="rejection_gaussian"):
-        sampler.rejection_gaussian(rng, np.array([0.0]), sigma)
+    def test_sampler_for_window_gate_matches_discrete_gaussian_window(self):
+        # The gate's window estimate and discrete_gaussian's actual allocated
+        # window must now agree exactly (fix round 1, item 3) -- not just be
+        # "close" -- so this pins the formula on both sides together instead
+        # of just re-deriving sampler_for's copy in isolation.
+        tail_cut = 5.0
+        for sigma in (4.79, 6.77, 100.0, 4095.0):
+            k = math.ceil(tail_cut * sigma) + 1
+            gate_window = 2 * (math.ceil(tail_cut * sigma) + 1) + 1
+            actual_window = 2 * k + 1
+            self.assertEqual(gate_window, actual_window)
+
+    def test_sampler_for_resolves_every_concrete_sigma_without_raising(self):
+        expected_tier = {
+            **{name: sampler.discrete_gaussian for name in SMALL_SIGMA},
+            **{name: sampler.rejection_gaussian for name in WIDE_SIGMA},
+        }
+        for name, sigma in {**SMALL_SIGMA, **WIDE_SIGMA}.items():
+            got = sampler.sampler_for(sigma, SAMPLE_COUNT)
+            self.assertIs(got, expected_tier[name], (name, sigma, got))
+
+    def test_rounded_tier_is_selected_in_the_large_sigma_regime(self):
+        """The tier no concrete parameter set above reaches: sigma wide enough
+        that the per-sample Theorem-9 distance, unioned over every draw, is
+        still below 2**-64."""
+        sigma = 2.0**50
+        self.assertLess(sampler.rounded_gaussian_distance(sigma) * SAMPLE_COUNT, 2**-64)
+        self.assertIs(sampler.sampler_for(sigma, SAMPLE_COUNT), sampler.rounded_gaussian)
+
+    def test_a_large_enough_draw_count_pushes_the_rounded_tier_to_rejection(self):
+        """The union bound is what the count feeds, so raising it alone must be
+        able to disqualify a sigma the smaller count admitted."""
+        sigma = 2.0**50
+        per_sample = sampler.rounded_gaussian_distance(sigma)
+        too_many = int(2**-64 / per_sample) + 1
+        self.assertIs(sampler.sampler_for(sigma, too_many), sampler.rejection_gaussian)
+
+    @parameterized.parameters(0, -1)
+    def test_sampler_for_rejects_a_non_positive_sample_count(self, bad_count):
+        with self.assertRaisesRegex(ValueError, "sample_count"):
+            sampler.sampler_for(100.0, bad_count)
+
+    @parameterized.parameters(0.0, -1.0)
+    def test_sampler_for_raises_only_for_degenerate_sigma(self, sigma):
+        with self.assertRaisesRegex(ValueError, "sigma"):
+            sampler.sampler_for(sigma, SAMPLE_COUNT)
+
+    @parameterized.parameters(0.0, -1.0)
+    def test_rejection_gaussian_raises_for_degenerate_sigma(self, sigma):
+        rng = np.random.default_rng(0)
+        with self.assertRaisesRegex(ValueError, "rejection_gaussian"):
+            sampler.rejection_gaussian(rng, np.array([0.0]), sigma)
 
 
 # --- byte-stream samplers ---------------------------------------------------
@@ -258,207 +252,196 @@ def _stream(n_bytes: int, seed: int) -> bytes:
     return np.random.default_rng(seed).integers(0, 256, n_bytes, dtype=np.uint8).tobytes()
 
 
-def test_uniform_from_bytes_is_a_deterministic_function_of_the_bytes():
-    q, count = (1 << 50) - 27, 1000
-    data = _stream(sampler.uniform_bytes_needed(q, count), seed=7)
-    a = sampler.uniform_from_bytes(data, q, count)
-    b = sampler.uniform_from_bytes(data, q, count)
-    assert a.dtype == np.uint64 and a.shape == (count,)
-    np.testing.assert_array_equal(a, b)
-    assert (a < q).all()
-    # A uint8 ndarray carrying the same bytes is the same stream.
-    as_array = np.frombuffer(data, dtype=np.uint8)
-    np.testing.assert_array_equal(sampler.uniform_from_bytes(as_array, q, count), a)
+class ByteStreamSamplerTest(parameterized.TestCase):
+
+    def test_uniform_from_bytes_is_a_deterministic_function_of_the_bytes(self):
+        q, count = (1 << 50) - 27, 1000
+        data = _stream(sampler.uniform_bytes_needed(q, count), seed=7)
+        a = sampler.uniform_from_bytes(data, q, count)
+        b = sampler.uniform_from_bytes(data, q, count)
+        self.assertEqual(a.dtype, np.uint64)
+        self.assertEqual(a.shape, (count,))
+        np.testing.assert_array_equal(a, b)
+        self.assertTrue((a < q).all())
+        # A uint8 ndarray carrying the same bytes is the same stream.
+        as_array = np.frombuffer(data, dtype=np.uint8)
+        np.testing.assert_array_equal(sampler.uniform_from_bytes(as_array, q, count), a)
+
+    def test_uniform_from_bytes_chi_square_at_a_small_modulus(self):
+        q, n = 17, 200_000
+        data = _stream(sampler.uniform_bytes_needed(q, n), seed=11)
+        samples = sampler.uniform_from_bytes(data, q, n)
+        counts = np.bincount(samples.astype(np.int64), minlength=q)
+        self.assertGreater(stats.chisquare(counts).pvalue, 1e-6)
+
+    def test_uniform_from_bytes_ks_where_rejection_actually_bites(self):
+        # A modulus just above 2**63 pushes the rejection probability to ~1/2
+        # (the largest multiple of q below 2**64 is q itself), so this exercises
+        # the accept/reject path and its budget, not just the modular map.
+        q, n = (1 << 63) + 11, 100_000
+        needed = sampler.uniform_bytes_needed(q, n)
+        self.assertGreater(needed, 8 * n)  # rejection visibly inflated the budget
+        samples = sampler.uniform_from_bytes(_stream(needed, 13), q, n)
+        ks = stats.kstest(samples / q, "uniform")
+        self.assertGreater(ks.pvalue, 1e-6)
+
+    def test_uniform_bytes_needed_budget_is_minimal_for_the_stated_fail_prob(self):
+        # Independent cross-check of the budget computation: scipy's binomial
+        # survival function, against the module's own tail evaluation.
+        q, count, fail_prob = (1 << 63) + 11, 1000, 2.0**-128
+        needed = sampler.uniform_bytes_needed(q, count, fail_prob)
+        self.assertEqual(needed % 8, 0)
+        attempts = needed // 8
+        p_rej = 1.0 - ((1 << 64) // q) * q / 2.0**64
+        self.assertLessEqual(stats.binom.sf(attempts - count, attempts, p_rej), fail_prob)
+        self.assertGreater(stats.binom.sf(attempts - 1 - count, attempts - 1, p_rej), fail_prob)
+
+    def test_uniform_bytes_needed_has_no_slack_when_the_modulus_divides_2_64(self):
+        for q in (1, 1 << 32, 1 << 50):
+            self.assertEqual(sampler.uniform_bytes_needed(q, 64), 8 * 64)
+
+    def test_uniform_from_bytes_chunks_are_little_endian_uint64(self):
+        # With a power-of-two modulus nothing is ever rejected, so the output is
+        # exactly chunk % q chunk-by-chunk — which pins the `<u8` layout.
+        data = _stream(8 * 64, 5)
+        chunks = np.frombuffer(data, dtype="<u8")
+        np.testing.assert_array_equal(
+            sampler.uniform_from_bytes(data, 1 << 32, 64),
+            chunks % np.uint64(1 << 32),
+        )
+        self.assertTrue((sampler.uniform_from_bytes(data, 1, 64) == 0).all())
+
+    def test_uniform_from_bytes_requires_the_exact_byte_count(self):
+        q, count = 17, 100
+        needed = sampler.uniform_bytes_needed(q, count)
+        for n_bytes in (needed - 8, needed + 8):
+            with self.assertRaisesRegex(ValueError, "bytes"):
+                sampler.uniform_from_bytes(_stream(n_bytes, 3), q, count)
+
+    def test_uniform_from_bytes_raises_when_every_chunk_is_rejected(self):
+        # All-0xff chunks equal 2**64 - 1, which lies in the rejection region of
+        # any modulus that does not divide 2**64 — so the whole budget drains and
+        # the sampler must report it (probability <= fail_prob on honest bytes).
+        q, count = (1 << 63) + 11, 16
+        needed = sampler.uniform_bytes_needed(q, count)
+        with self.assertRaisesRegex(RuntimeError, "uniform_from_bytes"):
+            sampler.uniform_from_bytes(b"\xff" * needed, q, count)
+
+    @parameterized.parameters(0, 1 << 64)
+    def test_uniform_bytes_needed_rejects_a_bad_modulus(self, bad_modulus):
+        with self.assertRaisesRegex(ValueError, "modulus"):
+            sampler.uniform_bytes_needed(bad_modulus, 4)
+
+    @parameterized.parameters(0, -1)
+    def test_uniform_bytes_needed_rejects_a_non_positive_count(self, bad_count):
+        with self.assertRaisesRegex(ValueError, "count"):
+            sampler.uniform_bytes_needed(17, bad_count)
+
+    def test_uniform_from_bytes_rejects_a_non_byte_buffer(self):
+        q, count = 17, 4
+        needed = sampler.uniform_bytes_needed(q, count)
+        with self.assertRaisesRegex(TypeError, "uint8"):
+            sampler.uniform_from_bytes(np.zeros(needed, dtype=np.uint32), q, count)
+
+    def test_fixed_weight_ternary_weight_support_and_determinism(self):
+        weight, degree = 39, 64
+        data = _stream(sampler.fixed_weight_ternary_bytes_needed(weight, degree), seed=17)
+        c = sampler.fixed_weight_ternary(data, weight, degree)
+        self.assertEqual(c.dtype, np.int64)
+        self.assertEqual(c.shape, (degree,))
+        self.assertEqual(int(np.count_nonzero(c)), weight)
+        self.assertTrue(set(np.unique(c)).issubset({-1, 0, 1}))
+        np.testing.assert_array_equal(sampler.fixed_weight_ternary(data, weight, degree), c)
+
+    def test_fixed_weight_ternary_position_marginals_chi_square(self):
+        # Each draw's support is a weight-subset of the positions, so per-position
+        # counts over n draws have mean n*weight/degree with *negative* cross-
+        # position correlation — Pearson's statistic against the multinomial
+        # reference is conservative here (its true variance is smaller), which is
+        # the safe direction for a p > 1e-6 gate.
+        weight, degree, n = 13, 32, 20_000
+        needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+        streams = np.random.default_rng(100_000).integers(0, 256, (n, needed), dtype=np.uint8)
+        counts = np.zeros(degree, dtype=np.int64)
+        for k in range(n):
+            counts += sampler.fixed_weight_ternary(streams[k], weight, degree) != 0
+        self.assertEqual(counts.sum(), n * weight)
+        self.assertGreater(stats.chisquare(counts).pvalue, 1e-6)
+
+    def test_fixed_weight_ternary_sign_balance_and_position_independence(self):
+        weight, degree, n = 13, 32, 20_000
+        needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+        streams = np.random.default_rng(200_000).integers(0, 256, (n, needed), dtype=np.uint8)
+        plus = np.zeros(degree, dtype=np.int64)
+        minus = np.zeros(degree, dtype=np.int64)
+        for k in range(n):
+            c = sampler.fixed_weight_ternary(streams[k], weight, degree)
+            plus += c == 1
+            minus += c == -1
+        self.assertGreater(stats.binomtest(int(plus.sum()), int(plus.sum() + minus.sum()), 0.5).pvalue, 1e-6)
+        # Sign must not depend on where the coefficient landed.
+        self.assertGreater(stats.chi2_contingency(np.vstack([plus, minus])).pvalue, 1e-6)
+
+    def test_fixed_weight_ternary_bytes_needed_budget_is_minimal(self):
+        # Independent recomputation of the per-position rejection probabilities
+        # and the union bound the round budget is derived from.
+        from fractions import Fraction
+
+        weight, degree, fail_prob = 39, 64, 2.0**-128
+
+        def union_bound(rounds: int) -> Fraction:
+            total = Fraction(0)
+            for m in range(degree - weight + 1, degree + 1):
+                largest_multiple = (1 << 64) // m * m
+                total += Fraction((1 << 64) - largest_multiple, 1 << 64) ** rounds
+            return total
+
+        needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree, fail_prob)
+        sign_bytes = (weight + 7) // 8
+        self.assertEqual((needed - sign_bytes) % (8 * weight), 0)
+        rounds = (needed - sign_bytes) // (8 * weight)
+        self.assertLessEqual(union_bound(rounds), Fraction(fail_prob))
+        self.assertTrue(rounds == 1 or union_bound(rounds - 1) > Fraction(fail_prob))
+
+    def test_fixed_weight_ternary_needs_one_round_when_no_position_can_reject(self):
+        # degree=8, weight=1 puts the single Fisher-Yates draw at modulus 8,
+        # which divides 2**64 — no rejection region, so exactly one chunk plus
+        # one sign byte.
+        self.assertEqual(sampler.fixed_weight_ternary_bytes_needed(1, 8), 8 + 1)
+
+    def test_fixed_weight_ternary_signs_live_in_the_trailing_bytes(self):
+        # Flipping only the sign bytes must preserve the support and flip signs —
+        # this pins the stream layout (position chunks first, sign bits last).
+        weight, degree = 5, 16
+        needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+        sign_bytes = (weight + 7) // 8
+        data = _stream(needed, 23)
+        flipped = data[:-sign_bytes] + bytes(b ^ 0xFF for b in data[-sign_bytes:])
+        a = sampler.fixed_weight_ternary(data, weight, degree)
+        b = sampler.fixed_weight_ternary(flipped, weight, degree)
+        np.testing.assert_array_equal(a != 0, b != 0)
+        np.testing.assert_array_equal(a[a != 0], -b[b != 0])
+
+    def test_fixed_weight_ternary_requires_the_exact_byte_count(self):
+        weight, degree = 5, 16
+        needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+        for n_bytes in (needed - 1, needed + 1):
+            with self.assertRaisesRegex(ValueError, "bytes"):
+                sampler.fixed_weight_ternary(_stream(n_bytes, 3), weight, degree)
+
+    def test_fixed_weight_ternary_raises_when_a_position_rejects_its_whole_budget(self):
+        # weight=2, degree=10 puts the draws at moduli 9 and 10, neither of which
+        # divides 2**64 — so all-0xff chunks land in every rejection region.
+        weight, degree = 2, 10
+        needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+        with self.assertRaisesRegex(RuntimeError, "fixed_weight_ternary"):
+            sampler.fixed_weight_ternary(b"\xff" * needed, weight, degree)
+
+    @parameterized.parameters((0, 8), (-1, 8), (9, 8))
+    def test_fixed_weight_ternary_rejects_a_bad_weight(self, weight, degree):
+        with self.assertRaisesRegex(ValueError, "weight"):
+            sampler.fixed_weight_ternary_bytes_needed(weight, degree)
 
 
-def test_uniform_from_bytes_chi_square_at_a_small_modulus():
-    q, n = 17, 200_000
-    data = _stream(sampler.uniform_bytes_needed(q, n), seed=11)
-    samples = sampler.uniform_from_bytes(data, q, n)
-    counts = np.bincount(samples.astype(np.int64), minlength=q)
-    assert stats.chisquare(counts).pvalue > 1e-6
-
-
-def test_uniform_from_bytes_ks_where_rejection_actually_bites():
-    # A modulus just above 2**63 pushes the rejection probability to ~1/2
-    # (the largest multiple of q below 2**64 is q itself), so this exercises
-    # the accept/reject path and its budget, not just the modular map.
-    q, n = (1 << 63) + 11, 100_000
-    needed = sampler.uniform_bytes_needed(q, n)
-    assert needed > 8 * n  # rejection visibly inflated the budget
-    samples = sampler.uniform_from_bytes(_stream(needed, 13), q, n)
-    ks = stats.kstest(samples / q, "uniform")
-    assert ks.pvalue > 1e-6
-
-
-def test_uniform_bytes_needed_budget_is_minimal_for_the_stated_fail_prob():
-    # Independent cross-check of the budget computation: scipy's binomial
-    # survival function, against the module's own tail evaluation.
-    q, count, fail_prob = (1 << 63) + 11, 1000, 2.0**-128
-    needed = sampler.uniform_bytes_needed(q, count, fail_prob)
-    assert needed % 8 == 0
-    attempts = needed // 8
-    p_rej = 1.0 - ((1 << 64) // q) * q / 2.0**64
-    assert stats.binom.sf(attempts - count, attempts, p_rej) <= fail_prob
-    assert stats.binom.sf(attempts - 1 - count, attempts - 1, p_rej) > fail_prob
-
-
-def test_uniform_bytes_needed_has_no_slack_when_the_modulus_divides_2_64():
-    for q in (1, 1 << 32, 1 << 50):
-        assert sampler.uniform_bytes_needed(q, 64) == 8 * 64
-
-
-def test_uniform_from_bytes_chunks_are_little_endian_uint64():
-    # With a power-of-two modulus nothing is ever rejected, so the output is
-    # exactly chunk % q chunk-by-chunk — which pins the `<u8` layout.
-    data = _stream(8 * 64, 5)
-    chunks = np.frombuffer(data, dtype="<u8")
-    np.testing.assert_array_equal(
-        sampler.uniform_from_bytes(data, 1 << 32, 64),
-        chunks % np.uint64(1 << 32),
-    )
-    assert (sampler.uniform_from_bytes(data, 1, 64) == 0).all()
-
-
-def test_uniform_from_bytes_requires_the_exact_byte_count():
-    q, count = 17, 100
-    needed = sampler.uniform_bytes_needed(q, count)
-    for n_bytes in (needed - 8, needed + 8):
-        with pytest.raises(ValueError, match="bytes"):
-            sampler.uniform_from_bytes(_stream(n_bytes, 3), q, count)
-
-
-def test_uniform_from_bytes_raises_when_every_chunk_is_rejected():
-    # All-0xff chunks equal 2**64 - 1, which lies in the rejection region of
-    # any modulus that does not divide 2**64 — so the whole budget drains and
-    # the sampler must report it (probability <= fail_prob on honest bytes).
-    q, count = (1 << 63) + 11, 16
-    needed = sampler.uniform_bytes_needed(q, count)
-    with pytest.raises(RuntimeError, match="uniform_from_bytes"):
-        sampler.uniform_from_bytes(b"\xff" * needed, q, count)
-
-
-@pytest.mark.parametrize("bad_modulus", [0, 1 << 64])
-def test_uniform_bytes_needed_rejects_a_bad_modulus(bad_modulus):
-    with pytest.raises(ValueError, match="modulus"):
-        sampler.uniform_bytes_needed(bad_modulus, 4)
-
-
-@pytest.mark.parametrize("bad_count", [0, -1])
-def test_uniform_bytes_needed_rejects_a_non_positive_count(bad_count):
-    with pytest.raises(ValueError, match="count"):
-        sampler.uniform_bytes_needed(17, bad_count)
-
-
-def test_uniform_from_bytes_rejects_a_non_byte_buffer():
-    q, count = 17, 4
-    needed = sampler.uniform_bytes_needed(q, count)
-    with pytest.raises(TypeError, match="uint8"):
-        sampler.uniform_from_bytes(np.zeros(needed, dtype=np.uint32), q, count)
-
-
-def test_fixed_weight_ternary_weight_support_and_determinism():
-    weight, degree = 39, 64
-    data = _stream(sampler.fixed_weight_ternary_bytes_needed(weight, degree), seed=17)
-    c = sampler.fixed_weight_ternary(data, weight, degree)
-    assert c.dtype == np.int64 and c.shape == (degree,)
-    assert int(np.count_nonzero(c)) == weight
-    assert set(np.unique(c)).issubset({-1, 0, 1})
-    np.testing.assert_array_equal(sampler.fixed_weight_ternary(data, weight, degree), c)
-
-
-def test_fixed_weight_ternary_position_marginals_chi_square():
-    # Each draw's support is a weight-subset of the positions, so per-position
-    # counts over n draws have mean n*weight/degree with *negative* cross-
-    # position correlation — Pearson's statistic against the multinomial
-    # reference is conservative here (its true variance is smaller), which is
-    # the safe direction for a p > 1e-6 gate.
-    weight, degree, n = 13, 32, 20_000
-    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
-    streams = np.random.default_rng(100_000).integers(0, 256, (n, needed), dtype=np.uint8)
-    counts = np.zeros(degree, dtype=np.int64)
-    for k in range(n):
-        counts += sampler.fixed_weight_ternary(streams[k], weight, degree) != 0
-    assert counts.sum() == n * weight
-    assert stats.chisquare(counts).pvalue > 1e-6
-
-
-def test_fixed_weight_ternary_sign_balance_and_position_independence():
-    weight, degree, n = 13, 32, 20_000
-    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
-    streams = np.random.default_rng(200_000).integers(0, 256, (n, needed), dtype=np.uint8)
-    plus = np.zeros(degree, dtype=np.int64)
-    minus = np.zeros(degree, dtype=np.int64)
-    for k in range(n):
-        c = sampler.fixed_weight_ternary(streams[k], weight, degree)
-        plus += c == 1
-        minus += c == -1
-    assert stats.binomtest(int(plus.sum()), int(plus.sum() + minus.sum()), 0.5).pvalue > 1e-6
-    # Sign must not depend on where the coefficient landed.
-    assert stats.chi2_contingency(np.vstack([plus, minus])).pvalue > 1e-6
-
-
-def test_fixed_weight_ternary_bytes_needed_budget_is_minimal():
-    # Independent recomputation of the per-position rejection probabilities
-    # and the union bound the round budget is derived from.
-    from fractions import Fraction
-
-    weight, degree, fail_prob = 39, 64, 2.0**-128
-
-    def union_bound(rounds: int) -> Fraction:
-        total = Fraction(0)
-        for m in range(degree - weight + 1, degree + 1):
-            largest_multiple = (1 << 64) // m * m
-            total += Fraction((1 << 64) - largest_multiple, 1 << 64) ** rounds
-        return total
-
-    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree, fail_prob)
-    sign_bytes = (weight + 7) // 8
-    assert (needed - sign_bytes) % (8 * weight) == 0
-    rounds = (needed - sign_bytes) // (8 * weight)
-    assert union_bound(rounds) <= Fraction(fail_prob)
-    assert rounds == 1 or union_bound(rounds - 1) > Fraction(fail_prob)
-
-
-def test_fixed_weight_ternary_needs_one_round_when_no_position_can_reject():
-    # degree=8, weight=1 puts the single Fisher-Yates draw at modulus 8,
-    # which divides 2**64 — no rejection region, so exactly one chunk plus
-    # one sign byte.
-    assert sampler.fixed_weight_ternary_bytes_needed(1, 8) == 8 + 1
-
-
-def test_fixed_weight_ternary_signs_live_in_the_trailing_bytes():
-    # Flipping only the sign bytes must preserve the support and flip signs —
-    # this pins the stream layout (position chunks first, sign bits last).
-    weight, degree = 5, 16
-    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
-    sign_bytes = (weight + 7) // 8
-    data = _stream(needed, 23)
-    flipped = data[:-sign_bytes] + bytes(b ^ 0xFF for b in data[-sign_bytes:])
-    a = sampler.fixed_weight_ternary(data, weight, degree)
-    b = sampler.fixed_weight_ternary(flipped, weight, degree)
-    np.testing.assert_array_equal(a != 0, b != 0)
-    np.testing.assert_array_equal(a[a != 0], -b[b != 0])
-
-
-def test_fixed_weight_ternary_requires_the_exact_byte_count():
-    weight, degree = 5, 16
-    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
-    for n_bytes in (needed - 1, needed + 1):
-        with pytest.raises(ValueError, match="bytes"):
-            sampler.fixed_weight_ternary(_stream(n_bytes, 3), weight, degree)
-
-
-def test_fixed_weight_ternary_raises_when_a_position_rejects_its_whole_budget():
-    # weight=2, degree=10 puts the draws at moduli 9 and 10, neither of which
-    # divides 2**64 — so all-0xff chunks land in every rejection region.
-    weight, degree = 2, 10
-    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
-    with pytest.raises(RuntimeError, match="fixed_weight_ternary"):
-        sampler.fixed_weight_ternary(b"\xff" * needed, weight, degree)
-
-
-@pytest.mark.parametrize("weight,degree", [(0, 8), (-1, 8), (9, 8)])
-def test_fixed_weight_ternary_rejects_a_bad_weight(weight, degree):
-    with pytest.raises(ValueError, match="weight"):
-        sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+if __name__ == "__main__":
+    absltest.main()

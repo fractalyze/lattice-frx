@@ -4,8 +4,9 @@
 # numpy backs the host reference ring; frx and zk-dtypes back the device one.
 # Neither is a crypto library and neither is a scheme repo — enc-frx and
 # sig-frx already sit on both, so depending on them closes no loop (see
-# MODULE.bazel). pytest and scipy are test-only; scipy backs the sampler's
-# distribution checks (chi-square / Kolmogorov-Smirnov).
+# MODULE.bazel). absl-py and scipy are test-only; absl-py is the test
+# framework, scipy backs the sampler's distribution checks (chi-square /
+# Kolmogorov-Smirnov).
 #
 # frx / frxlib / zk-dtypes move in lockstep: a frx wheel bump that leaves
 # zk-dtypes behind fails at the field dtypes rather than at the pin. These are
@@ -14,5 +15,5 @@ numpy
 frx==0.10.2.dev20260812130529
 frxlib==0.10.2.dev20260812130529
 zk-dtypes==0.0.14
-pytest
+absl-py
 scipy
