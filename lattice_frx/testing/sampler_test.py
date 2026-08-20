@@ -1,4 +1,5 @@
-"""Tests for `lattice_frx.sampler`'s tiered Gaussian samplers.
+"""Tests for `lattice_frx.sampler`: the tiered Gaussian samplers and the
+byte-stream samplers (`uniform_from_bytes`, `fixed_weight_ternary`).
 
 `sampler_for`'s tier gate is exercised against a *real* concrete
 parameter set rather than round numbers — the six σ and the draw count
@@ -245,3 +246,112 @@ def test_rejection_gaussian_raises_for_degenerate_sigma(sigma):
     with pytest.raises(ValueError, match="rejection_gaussian"):
         sampler.rejection_gaussian(rng, np.array([0.0]), sigma)
 
+
+# --- byte-stream samplers ---------------------------------------------------
+#
+# The tests below stand in for a consumer's XOF with deterministic
+# pseudo-random bytes: the byte-stream samplers' contract is exactly that the
+# *source* of the bytes is not their business.
+
+
+def _stream(n_bytes: int, seed: int) -> bytes:
+    return np.random.default_rng(seed).integers(0, 256, n_bytes, dtype=np.uint8).tobytes()
+
+
+def test_uniform_from_bytes_is_a_deterministic_function_of_the_bytes():
+    q, count = (1 << 50) - 27, 1000
+    data = _stream(sampler.uniform_bytes_needed(count, q), seed=7)
+    a = sampler.uniform_from_bytes(data, q, count)
+    b = sampler.uniform_from_bytes(data, q, count)
+    assert a.dtype == np.uint64 and a.shape == (count,)
+    np.testing.assert_array_equal(a, b)
+    assert (a < q).all()
+    # A uint8 ndarray carrying the same bytes is the same stream.
+    as_array = np.frombuffer(data, dtype=np.uint8)
+    np.testing.assert_array_equal(sampler.uniform_from_bytes(as_array, q, count), a)
+
+
+def test_uniform_from_bytes_chi_square_at_a_small_modulus():
+    q, n = 17, 200_000
+    data = _stream(sampler.uniform_bytes_needed(n, q), seed=11)
+    samples = sampler.uniform_from_bytes(data, q, n)
+    counts = np.bincount(samples.astype(np.int64), minlength=q)
+    assert stats.chisquare(counts).pvalue > 1e-6
+
+
+def test_uniform_from_bytes_ks_where_rejection_actually_bites():
+    # A modulus just above 2**63 pushes the rejection probability to ~1/2
+    # (the largest multiple of q below 2**64 is q itself), so this exercises
+    # the accept/reject path and its budget, not just the modular map.
+    q, n = (1 << 63) + 11, 100_000
+    needed = sampler.uniform_bytes_needed(n, q)
+    assert needed > 8 * n  # rejection visibly inflated the budget
+    samples = sampler.uniform_from_bytes(_stream(needed, 13), q, n)
+    ks = stats.kstest(samples / q, "uniform")
+    assert ks.pvalue > 1e-6
+
+
+def test_uniform_bytes_needed_budget_is_minimal_for_the_stated_fail_prob():
+    # Independent cross-check of the budget computation: scipy's binomial
+    # survival function, against the module's own tail evaluation.
+    q, count, fail_prob = (1 << 63) + 11, 1000, 2.0**-128
+    needed = sampler.uniform_bytes_needed(count, q, fail_prob)
+    assert needed % 8 == 0
+    attempts = needed // 8
+    p_rej = 1.0 - ((1 << 64) // q) * q / 2.0**64
+    assert stats.binom.sf(attempts - count, attempts, p_rej) <= fail_prob
+    assert stats.binom.sf(attempts - 1 - count, attempts - 1, p_rej) > fail_prob
+
+
+def test_uniform_bytes_needed_has_no_slack_when_the_modulus_divides_2_64():
+    for q in (1, 1 << 32, 1 << 50):
+        assert sampler.uniform_bytes_needed(64, q) == 8 * 64
+
+
+def test_uniform_from_bytes_chunks_are_little_endian_uint64():
+    # With a power-of-two modulus nothing is ever rejected, so the output is
+    # exactly chunk % q chunk-by-chunk — which pins the `<u8` layout.
+    data = _stream(8 * 64, 5)
+    chunks = np.frombuffer(data, dtype="<u8")
+    np.testing.assert_array_equal(
+        sampler.uniform_from_bytes(data, 1 << 32, 64),
+        chunks % np.uint64(1 << 32),
+    )
+    assert (sampler.uniform_from_bytes(data, 1, 64) == 0).all()
+
+
+def test_uniform_from_bytes_requires_the_exact_byte_count():
+    q, count = 17, 100
+    needed = sampler.uniform_bytes_needed(count, q)
+    for n_bytes in (needed - 8, needed + 8):
+        with pytest.raises(ValueError, match="bytes"):
+            sampler.uniform_from_bytes(_stream(n_bytes, 3), q, count)
+
+
+def test_uniform_from_bytes_raises_when_every_chunk_is_rejected():
+    # All-0xff chunks equal 2**64 - 1, which lies in the rejection region of
+    # any modulus that does not divide 2**64 — so the whole budget drains and
+    # the sampler must report it (probability <= fail_prob on honest bytes).
+    q, count = (1 << 63) + 11, 16
+    needed = sampler.uniform_bytes_needed(count, q)
+    with pytest.raises(RuntimeError, match="uniform_from_bytes"):
+        sampler.uniform_from_bytes(b"\xff" * needed, q, count)
+
+
+@pytest.mark.parametrize("bad_modulus", [0, 1 << 64])
+def test_uniform_bytes_needed_rejects_a_bad_modulus(bad_modulus):
+    with pytest.raises(ValueError, match="modulus"):
+        sampler.uniform_bytes_needed(4, bad_modulus)
+
+
+@pytest.mark.parametrize("bad_count", [0, -1])
+def test_uniform_bytes_needed_rejects_a_non_positive_count(bad_count):
+    with pytest.raises(ValueError, match="count"):
+        sampler.uniform_bytes_needed(bad_count, 17)
+
+
+def test_uniform_from_bytes_rejects_a_non_byte_buffer():
+    q, count = 17, 4
+    needed = sampler.uniform_bytes_needed(count, q)
+    with pytest.raises(TypeError, match="uint8"):
+        sampler.uniform_from_bytes(np.zeros(needed, dtype=np.uint32), q, count)
