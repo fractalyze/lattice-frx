@@ -78,7 +78,7 @@ behaviors are ported deliberately and documented at their definitions,
 which is the kind of thing a shared library exists to pin so that
 consumers stop re-deriving it.
 
-### `sampler.py` — discrete Gaussians
+### `sampler.py` — discrete Gaussians, and byte-stream challenge draws
 
 Noise and masking must come from a *discrete* Gaussian over `ℤ`. A
 rounded continuous normal is a different distribution, and the difference
@@ -90,6 +90,16 @@ sampling from a discrete-Laplace proposal (any σ, any real center).
 `sampler_for(sigma, sample_count)` picks the tier. The count is a plain
 `int` because deriving it needs the caller's prover structure, which is
 scheme-specific, while nothing this package does with it is.
+
+A second family takes its randomness as an injected **byte stream**
+rather than a `Generator`, for draws that must be a deterministic
+function of a Fiat-Shamir transcript: `uniform_from_bytes` (uniform
+`Z_q`, no modulo bias) and `fixed_weight_ternary` (the SampleInBall-
+shaped challenge set). Rejection runs on budgets computed from a stated
+failure probability, so a draw consumes exactly the byte count its
+`*_bytes_needed` companion quotes; the stream contract is pinned in the
+module docstring, and the XOF or CSPRNG producing the bytes stays the
+consumer's, as ever.
 
 ### `gadget.py` — digit decomposition
 
@@ -136,9 +146,11 @@ substrate circular. Two things that consequently stay out:
 
 - **The CSPRNG behind a uniform sampler** (expanding a CRS seed into
   uniform public matrices — every MSIS/MLWE commitment needs one). The
-  algorithm choice, typically AES-CTR, belongs to the consumer and is
-  injected. The precedent is already here: every sampler takes
-  `rng: np.random.Generator` as an argument rather than building one.
+  algorithm choice, typically AES-CTR or an XOF, belongs to the consumer
+  and is injected. The precedent is already here: the Gaussian samplers
+  take `rng: np.random.Generator`, and the byte-stream samplers take the
+  squeezed bytes themselves — the bytes→`Z_q` mapping lives here, the
+  byte *producer* does not.
 - **Hashes and Fiat-Shamir transcripts.** Those are `hash-frx`'s and
   `zorch`'s.
 

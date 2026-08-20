@@ -1,4 +1,5 @@
-"""Tests for `lattice_frx.sampler`'s tiered Gaussian samplers.
+"""Tests for `lattice_frx.sampler`: the tiered Gaussian samplers and the
+byte-stream samplers (`uniform_from_bytes`, `fixed_weight_ternary`).
 
 `sampler_for`'s tier gate is exercised against a *real* concrete
 parameter set rather than round numbers — the six σ and the draw count
@@ -245,3 +246,219 @@ def test_rejection_gaussian_raises_for_degenerate_sigma(sigma):
     with pytest.raises(ValueError, match="rejection_gaussian"):
         sampler.rejection_gaussian(rng, np.array([0.0]), sigma)
 
+
+# --- byte-stream samplers ---------------------------------------------------
+#
+# The tests below stand in for a consumer's XOF with deterministic
+# pseudo-random bytes: the byte-stream samplers' contract is exactly that the
+# *source* of the bytes is not their business.
+
+
+def _stream(n_bytes: int, seed: int) -> bytes:
+    return np.random.default_rng(seed).integers(0, 256, n_bytes, dtype=np.uint8).tobytes()
+
+
+def test_uniform_from_bytes_is_a_deterministic_function_of_the_bytes():
+    q, count = (1 << 50) - 27, 1000
+    data = _stream(sampler.uniform_bytes_needed(q, count), seed=7)
+    a = sampler.uniform_from_bytes(data, q, count)
+    b = sampler.uniform_from_bytes(data, q, count)
+    assert a.dtype == np.uint64 and a.shape == (count,)
+    np.testing.assert_array_equal(a, b)
+    assert (a < q).all()
+    # A uint8 ndarray carrying the same bytes is the same stream.
+    as_array = np.frombuffer(data, dtype=np.uint8)
+    np.testing.assert_array_equal(sampler.uniform_from_bytes(as_array, q, count), a)
+
+
+def test_uniform_from_bytes_chi_square_at_a_small_modulus():
+    q, n = 17, 200_000
+    data = _stream(sampler.uniform_bytes_needed(q, n), seed=11)
+    samples = sampler.uniform_from_bytes(data, q, n)
+    counts = np.bincount(samples.astype(np.int64), minlength=q)
+    assert stats.chisquare(counts).pvalue > 1e-6
+
+
+def test_uniform_from_bytes_ks_where_rejection_actually_bites():
+    # A modulus just above 2**63 pushes the rejection probability to ~1/2
+    # (the largest multiple of q below 2**64 is q itself), so this exercises
+    # the accept/reject path and its budget, not just the modular map.
+    q, n = (1 << 63) + 11, 100_000
+    needed = sampler.uniform_bytes_needed(q, n)
+    assert needed > 8 * n  # rejection visibly inflated the budget
+    samples = sampler.uniform_from_bytes(_stream(needed, 13), q, n)
+    ks = stats.kstest(samples / q, "uniform")
+    assert ks.pvalue > 1e-6
+
+
+def test_uniform_bytes_needed_budget_is_minimal_for_the_stated_fail_prob():
+    # Independent cross-check of the budget computation: scipy's binomial
+    # survival function, against the module's own tail evaluation.
+    q, count, fail_prob = (1 << 63) + 11, 1000, 2.0**-128
+    needed = sampler.uniform_bytes_needed(q, count, fail_prob)
+    assert needed % 8 == 0
+    attempts = needed // 8
+    p_rej = 1.0 - ((1 << 64) // q) * q / 2.0**64
+    assert stats.binom.sf(attempts - count, attempts, p_rej) <= fail_prob
+    assert stats.binom.sf(attempts - 1 - count, attempts - 1, p_rej) > fail_prob
+
+
+def test_uniform_bytes_needed_has_no_slack_when_the_modulus_divides_2_64():
+    for q in (1, 1 << 32, 1 << 50):
+        assert sampler.uniform_bytes_needed(q, 64) == 8 * 64
+
+
+def test_uniform_from_bytes_chunks_are_little_endian_uint64():
+    # With a power-of-two modulus nothing is ever rejected, so the output is
+    # exactly chunk % q chunk-by-chunk — which pins the `<u8` layout.
+    data = _stream(8 * 64, 5)
+    chunks = np.frombuffer(data, dtype="<u8")
+    np.testing.assert_array_equal(
+        sampler.uniform_from_bytes(data, 1 << 32, 64),
+        chunks % np.uint64(1 << 32),
+    )
+    assert (sampler.uniform_from_bytes(data, 1, 64) == 0).all()
+
+
+def test_uniform_from_bytes_requires_the_exact_byte_count():
+    q, count = 17, 100
+    needed = sampler.uniform_bytes_needed(q, count)
+    for n_bytes in (needed - 8, needed + 8):
+        with pytest.raises(ValueError, match="bytes"):
+            sampler.uniform_from_bytes(_stream(n_bytes, 3), q, count)
+
+
+def test_uniform_from_bytes_raises_when_every_chunk_is_rejected():
+    # All-0xff chunks equal 2**64 - 1, which lies in the rejection region of
+    # any modulus that does not divide 2**64 — so the whole budget drains and
+    # the sampler must report it (probability <= fail_prob on honest bytes).
+    q, count = (1 << 63) + 11, 16
+    needed = sampler.uniform_bytes_needed(q, count)
+    with pytest.raises(RuntimeError, match="uniform_from_bytes"):
+        sampler.uniform_from_bytes(b"\xff" * needed, q, count)
+
+
+@pytest.mark.parametrize("bad_modulus", [0, 1 << 64])
+def test_uniform_bytes_needed_rejects_a_bad_modulus(bad_modulus):
+    with pytest.raises(ValueError, match="modulus"):
+        sampler.uniform_bytes_needed(bad_modulus, 4)
+
+
+@pytest.mark.parametrize("bad_count", [0, -1])
+def test_uniform_bytes_needed_rejects_a_non_positive_count(bad_count):
+    with pytest.raises(ValueError, match="count"):
+        sampler.uniform_bytes_needed(17, bad_count)
+
+
+def test_uniform_from_bytes_rejects_a_non_byte_buffer():
+    q, count = 17, 4
+    needed = sampler.uniform_bytes_needed(q, count)
+    with pytest.raises(TypeError, match="uint8"):
+        sampler.uniform_from_bytes(np.zeros(needed, dtype=np.uint32), q, count)
+
+
+def test_fixed_weight_ternary_weight_support_and_determinism():
+    weight, degree = 39, 64
+    data = _stream(sampler.fixed_weight_ternary_bytes_needed(weight, degree), seed=17)
+    c = sampler.fixed_weight_ternary(data, weight, degree)
+    assert c.dtype == np.int64 and c.shape == (degree,)
+    assert int(np.count_nonzero(c)) == weight
+    assert set(np.unique(c)).issubset({-1, 0, 1})
+    np.testing.assert_array_equal(sampler.fixed_weight_ternary(data, weight, degree), c)
+
+
+def test_fixed_weight_ternary_position_marginals_chi_square():
+    # Each draw's support is a weight-subset of the positions, so per-position
+    # counts over n draws have mean n*weight/degree with *negative* cross-
+    # position correlation — Pearson's statistic against the multinomial
+    # reference is conservative here (its true variance is smaller), which is
+    # the safe direction for a p > 1e-6 gate.
+    weight, degree, n = 13, 32, 20_000
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    streams = np.random.default_rng(100_000).integers(0, 256, (n, needed), dtype=np.uint8)
+    counts = np.zeros(degree, dtype=np.int64)
+    for k in range(n):
+        counts += sampler.fixed_weight_ternary(streams[k], weight, degree) != 0
+    assert counts.sum() == n * weight
+    assert stats.chisquare(counts).pvalue > 1e-6
+
+
+def test_fixed_weight_ternary_sign_balance_and_position_independence():
+    weight, degree, n = 13, 32, 20_000
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    streams = np.random.default_rng(200_000).integers(0, 256, (n, needed), dtype=np.uint8)
+    plus = np.zeros(degree, dtype=np.int64)
+    minus = np.zeros(degree, dtype=np.int64)
+    for k in range(n):
+        c = sampler.fixed_weight_ternary(streams[k], weight, degree)
+        plus += c == 1
+        minus += c == -1
+    assert stats.binomtest(int(plus.sum()), int(plus.sum() + minus.sum()), 0.5).pvalue > 1e-6
+    # Sign must not depend on where the coefficient landed.
+    assert stats.chi2_contingency(np.vstack([plus, minus])).pvalue > 1e-6
+
+
+def test_fixed_weight_ternary_bytes_needed_budget_is_minimal():
+    # Independent recomputation of the per-position rejection probabilities
+    # and the union bound the round budget is derived from.
+    from fractions import Fraction
+
+    weight, degree, fail_prob = 39, 64, 2.0**-128
+
+    def union_bound(rounds: int) -> Fraction:
+        total = Fraction(0)
+        for m in range(degree - weight + 1, degree + 1):
+            largest_multiple = (1 << 64) // m * m
+            total += Fraction((1 << 64) - largest_multiple, 1 << 64) ** rounds
+        return total
+
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree, fail_prob)
+    sign_bytes = (weight + 7) // 8
+    assert (needed - sign_bytes) % (8 * weight) == 0
+    rounds = (needed - sign_bytes) // (8 * weight)
+    assert union_bound(rounds) <= Fraction(fail_prob)
+    assert rounds == 1 or union_bound(rounds - 1) > Fraction(fail_prob)
+
+
+def test_fixed_weight_ternary_needs_one_round_when_no_position_can_reject():
+    # degree=8, weight=1 puts the single Fisher-Yates draw at modulus 8,
+    # which divides 2**64 — no rejection region, so exactly one chunk plus
+    # one sign byte.
+    assert sampler.fixed_weight_ternary_bytes_needed(1, 8) == 8 + 1
+
+
+def test_fixed_weight_ternary_signs_live_in_the_trailing_bytes():
+    # Flipping only the sign bytes must preserve the support and flip signs —
+    # this pins the stream layout (position chunks first, sign bits last).
+    weight, degree = 5, 16
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    sign_bytes = (weight + 7) // 8
+    data = _stream(needed, 23)
+    flipped = data[:-sign_bytes] + bytes(b ^ 0xFF for b in data[-sign_bytes:])
+    a = sampler.fixed_weight_ternary(data, weight, degree)
+    b = sampler.fixed_weight_ternary(flipped, weight, degree)
+    np.testing.assert_array_equal(a != 0, b != 0)
+    np.testing.assert_array_equal(a[a != 0], -b[b != 0])
+
+
+def test_fixed_weight_ternary_requires_the_exact_byte_count():
+    weight, degree = 5, 16
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    for n_bytes in (needed - 1, needed + 1):
+        with pytest.raises(ValueError, match="bytes"):
+            sampler.fixed_weight_ternary(_stream(n_bytes, 3), weight, degree)
+
+
+def test_fixed_weight_ternary_raises_when_a_position_rejects_its_whole_budget():
+    # weight=2, degree=10 puts the draws at moduli 9 and 10, neither of which
+    # divides 2**64 — so all-0xff chunks land in every rejection region.
+    weight, degree = 2, 10
+    needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    with pytest.raises(RuntimeError, match="fixed_weight_ternary"):
+        sampler.fixed_weight_ternary(b"\xff" * needed, weight, degree)
+
+
+@pytest.mark.parametrize("weight,degree", [(0, 8), (-1, 8), (9, 8)])
+def test_fixed_weight_ternary_rejects_a_bad_weight(weight, degree):
+    with pytest.raises(ValueError, match="weight"):
+        sampler.fixed_weight_ternary_bytes_needed(weight, degree)

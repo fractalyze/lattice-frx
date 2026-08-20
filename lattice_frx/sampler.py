@@ -40,8 +40,31 @@ this package holds to generally: the *choice* of randomness source (and
 of any CSPRNG behind it) belongs to the consumer, so that this package
 keeps no dependency on a cipher or hash library. (frx and
 zk-dtypes are the array layer, not primitives — see CLAUDE.md.)
+
+**The byte-stream contract.** Fiat-Shamir consumers need samplers that
+are a *deterministic function of transcript bytes*, which a `Generator`
+cannot express. For those, this module's second family
+(`uniform_from_bytes`, `fixed_weight_ternary`) takes the randomness as
+an injected byte buffer instead — `bytes`, `bytearray`, or a `uint8`
+ndarray — under one contract:
+
+- The stream is consumed as consecutive **little-endian `uint64`
+  chunks** (plus, where a sampler needs them, trailing raw bit/byte
+  fields its docstring lays out).
+- Consumption is **fixed ahead of time**: every rejection loop runs a
+  budget computed from a stated failure probability rather than
+  retrying open-endedly, so the total byte count is a function of the
+  parameters alone. Each sampler's companion `*_bytes_needed` function
+  is that count, and the sampler requires **exactly** that many bytes —
+  a mismatch raises `ValueError` rather than silently reading a prefix,
+  so two callers sharing one squeezed block cannot mis-slice quietly.
+- Identical bytes yield identical output. Where the bytes come from — a
+  XOF over a transcript, a CSPRNG, a test vector — is the consumer's
+  choice, exactly as `rng` is for the Gaussian tier.
 """
+import functools
 import math
+from fractions import Fraction
 
 import numpy as np
 
@@ -259,3 +282,261 @@ def sampler_for(sigma: float, sample_count: int, tail_cut: float = 5.0):
         return rounded_gaussian
 
     return rejection_gaussian
+
+
+_TWO_64 = 1 << 64
+_DEFAULT_FAIL_PROB = 2.0**-128
+
+
+def _require_byte_stream(data, needed: int, caller: str) -> np.ndarray:
+    """Validate and normalize an injected byte stream to a `uint8` array of
+    exactly `needed` bytes. The two failure modes stay distinct on purpose
+    (mirroring `canonical.py`): a wrong *kind* of buffer is a `TypeError`,
+    a wrong *length* is a `ValueError` — they are different caller bugs."""
+    if isinstance(data, (bytes, bytearray)):
+        buf = np.frombuffer(bytes(data), dtype=np.uint8)
+    elif isinstance(data, np.ndarray):
+        if data.dtype != np.uint8:
+            raise TypeError(f"{caller}: byte stream array must be uint8, got {data.dtype}")
+        buf = np.ascontiguousarray(data)
+    else:
+        raise TypeError(
+            f"{caller}: byte stream must be bytes, bytearray, or a uint8 ndarray, "
+            f"got {type(data).__name__}"
+        )
+    if buf.size != needed:
+        raise ValueError(
+            f"{caller}: expected exactly {needed} bytes for these parameters "
+            f"(the *_bytes_needed count), got {buf.size}"
+        )
+    return buf
+
+
+def _require_fail_prob(fail_prob: float) -> None:
+    """The one range check for the byte-stream family's shared knob."""
+    if not 0.0 < fail_prob < 1.0:
+        raise ValueError(f"fail_prob must be in (0, 1), got {fail_prob!r}")
+
+
+def _rejected_chunk_count(modulus: int) -> int:
+    """How many of the `2**64` chunk values the no-modulo-bias rejection
+    refuses at this modulus: `2**64 mod modulus`, the tail above the
+    largest whole number of congruence classes. The single definition of
+    the accept region — the samplers test against it via
+    `_max_accepted_chunk` and the budgets price it via `_rejection_prob`,
+    so wire format and failure math agree by construction rather than by
+    matching spellings."""
+    return _TWO_64 % modulus
+
+
+def _max_accepted_chunk(modulus: int) -> int:
+    """The largest uint64 chunk value accepted at this modulus — inclusive,
+    so it is always representable in uint64 (the half-open bound would be
+    `2**64` itself whenever `modulus` divides `2**64`)."""
+    return _TWO_64 - 1 - _rejected_chunk_count(modulus)
+
+
+def _rejection_prob(modulus: int) -> Fraction:
+    """The exact per-chunk rejection probability at this modulus."""
+    return Fraction(_rejected_chunk_count(modulus), _TWO_64)
+
+
+def _log_binom_sf(attempts: int, allowed: int, p_rej: float) -> float:
+    """`log P(Binomial(attempts, p_rej) > allowed)` — the probability that a
+    fixed-budget rejection pass fails, i.e. that more than `allowed` of the
+    `attempts` draws land in the rejection region.
+
+    Evaluated as the tail sum of exact binomial terms in log space
+    (`lgamma`; ~1e-12 relative precision, against decision thresholds like
+    2**-128 where the neighboring budgets differ by orders of magnitude —
+    the independent scipy cross-check lives in `sampler_test.py`). Two
+    shortcuts keep the search cheap without giving up soundness:
+
+    - `allowed + 1 <= floor(attempts * p_rej)` returns `log(1/2)` outright:
+      a binomial's median is at least `floor(mean)`, so the true tail is
+      >= 1/2 — far above any cryptographic failure target, which is the
+      only question the caller asks in that regime.
+    - The sum stops once past the mode with the running term 60 nats below
+      the accumulated total; the remaining terms are decreasing, so the
+      truncation error is negligible at the thresholds compared against.
+    """
+    if allowed + 1 <= math.floor(attempts * p_rej):
+        return math.log(0.5)
+    log_p, log_1p = math.log(p_rej), math.log1p(-p_rej)
+    lg_n = math.lgamma(attempts + 1)
+    acc = -math.inf
+    for k in range(allowed + 1, attempts + 1):
+        term = (lg_n - math.lgamma(k + 1) - math.lgamma(attempts - k + 1)
+                + k * log_p + (attempts - k) * log_1p)
+        acc = float(np.logaddexp(acc, term))
+        if k > attempts * p_rej and term < acc - 60.0:
+            break
+    return acc
+
+
+@functools.cache
+def _rejection_slack(count: int, p_rej: float, fail_prob: float) -> int:
+    """The minimal `slack` such that `count + slack` draws, each rejected
+    independently with probability `p_rej`, yield at least `count` accepted
+    ones except with probability <= `fail_prob` — i.e. the smallest budget
+    with `P(Bin(count + slack, p_rej) > slack) <= fail_prob`. That tail is
+    non-increasing in `slack` (adding a draw adds at most one rejection but
+    also one more allowance), so binary search applies. Cached: the search
+    is pure in its scalar arguments, and the Fiat-Shamir call pattern
+    re-asks it at one fixed parameter set per transcript."""
+    log_eps = math.log(fail_prob)
+
+    def ok(slack: int) -> bool:
+        return _log_binom_sf(count + slack, slack, p_rej) <= log_eps
+
+    if ok(0):
+        return 0
+    lo, hi = 0, 1
+    while not ok(hi):
+        lo, hi = hi, hi * 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if ok(mid):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
+def uniform_bytes_needed(modulus: int, count: int, fail_prob: float = _DEFAULT_FAIL_PROB) -> int:
+    """The exact byte count `uniform_from_bytes` consumes for these
+    parameters — `8 * (count + slack)`, where the slack is the minimal
+    rejection budget at failure probability `fail_prob` (see
+    `_rejection_slack`), and zero whenever `modulus` divides `2**64`,
+    since no chunk is ever rejected then. Parameters ride in the same
+    order as `uniform_from_bytes` minus the stream, as with every
+    `*_bytes_needed` companion."""
+    if not 1 <= modulus < _TWO_64:
+        raise ValueError(f"modulus must be in [1, 2**64), got {modulus!r}")
+    if count <= 0:
+        raise ValueError(f"count must be positive, got {count!r}")
+    _require_fail_prob(fail_prob)
+    p_rej = _rejection_prob(modulus)
+    if p_rej == 0:
+        return 8 * count
+    return 8 * (count + _rejection_slack(count, float(p_rej), fail_prob))
+
+
+def uniform_from_bytes(data, modulus: int, count: int, fail_prob: float = _DEFAULT_FAIL_PROB) -> np.ndarray:
+    """`count` independent uniform draws from `[0, modulus)` as a
+    deterministic function of the injected byte stream (see the module
+    docstring for the stream contract).
+
+    Each little-endian `uint64` chunk `c` is **accepted** iff it lies below
+    the largest multiple of `modulus` not exceeding `2**64` (i.e. at most
+    `_max_accepted_chunk`), and an accepted chunk contributes `c % modulus`
+    — exactly uniform, with no modulo bias (the accepted region is a whole
+    number of congruence classes). The first `count` accepted chunks, in
+    stream order, are the result. The stream length is fixed at
+    `uniform_bytes_needed(...)`: rejection is paid for with a precomputed
+    budget rather than an open-ended retry, so on an honestly random
+    stream the sampler fails (raises) with probability at most
+    `fail_prob`, and never reads a data-dependent number of bytes."""
+    needed = uniform_bytes_needed(modulus, count, fail_prob)  # validates params
+    buf = _require_byte_stream(data, needed, "uniform_from_bytes")
+    chunks = buf.view(np.dtype("<u8"))
+    accepted = chunks[chunks <= np.uint64(_max_accepted_chunk(modulus))]
+    if accepted.size < count:
+        raise RuntimeError(
+            f"uniform_from_bytes: only {accepted.size} of the required {count} "
+            f"draws were accepted from the stream — on honestly random bytes "
+            f"this has probability <= {fail_prob!r}, so suspect the stream "
+            f"(or a caller's slicing), not bad luck."
+        )
+    return accepted[:count] % np.uint64(modulus)
+
+
+@functools.cache
+def _ternary_rounds(weight: int, degree: int, fail_prob: float) -> int:
+    """The minimal per-position candidate count `rounds` such that a
+    `fixed_weight_ternary` draw fails (some position rejects every one of
+    its candidates) with probability at most `fail_prob`.
+
+    Position `idx` draws uniformly from a modulus `m = degree - weight +
+    1 + idx`, rejecting a chunk with probability `p_m = (2**64 mod m) /
+    2**64`; the failure bound is the union over positions `sum_m p_m **
+    rounds` (an upper bound on the exact `1 - prod(1 - p_m**rounds)`).
+    Every `p_m` is an exact binary rational, and `rounds` stays tiny, so
+    this is evaluated in exact `Fraction` arithmetic — unlike the
+    log-space evaluation `uniform_bytes_needed`'s far larger budgets
+    force. Cached for the same reason `_rejection_slack` is."""
+    eps = Fraction(fail_prob)
+    ps = [_rejection_prob(m) for m in range(degree - weight + 1, degree + 1)]
+    rounds = 1
+    while sum(p**rounds for p in ps) > eps:
+        rounds += 1
+    return rounds
+
+
+def _ternary_layout(weight: int, degree: int, fail_prob: float) -> tuple[int, int, int]:
+    """`(rounds, sign_byte_count, total_bytes)` — the stream layout shared
+    by `fixed_weight_ternary` and its companion, defined once so the
+    parser cannot drift from the byte count the companion quoted."""
+    rounds = _ternary_rounds(weight, degree, fail_prob)
+    sign_byte_count = (weight + 7) // 8
+    return rounds, sign_byte_count, 8 * weight * rounds + sign_byte_count
+
+
+def fixed_weight_ternary_bytes_needed(weight: int, degree: int, fail_prob: float = _DEFAULT_FAIL_PROB) -> int:
+    """The exact byte count `fixed_weight_ternary` consumes: `8 * weight *
+    rounds` position-candidate chunks (see `_ternary_rounds`) followed by
+    `ceil(weight / 8)` sign bytes."""
+    if not 1 <= weight <= degree:
+        raise ValueError(f"weight must be in [1, degree], got weight={weight!r} at degree={degree!r}")
+    _require_fail_prob(fail_prob)
+    return _ternary_layout(weight, degree, fail_prob)[2]
+
+
+def fixed_weight_ternary(data, weight: int, degree: int, fail_prob: float = _DEFAULT_FAIL_PROB) -> np.ndarray:
+    """A degree-`degree` coefficient vector with exactly `weight` nonzero
+    entries, each in `{-1, +1}`, as a deterministic function of the injected
+    byte stream — the fixed-weight challenge set every Fiat-Shamir lattice
+    proof draws from. SampleInBall-shaped (FIPS 204 §7.3): a partial
+    Fisher-Yates walk over positions `degree - weight .. degree - 1`, where
+    step `i` swaps `coeffs[i] <- coeffs[j]` for a uniform `j in [0, i]` and
+    plants a sign at `j` — which puts a uniformly random `weight`-subset in
+    the support with independent fair signs.
+
+    Stream layout (after the module docstring's chunk convention): first a
+    `weight x rounds` block of candidate chunks, position-major — step `i`
+    owns `rounds` consecutive chunks and takes the first that survives the
+    same no-modulo-bias rejection `uniform_from_bytes` applies, at modulus
+    `i + 1` — then `ceil(weight / 8)` sign bytes, consumed LSB-first, one
+    bit per step in position order, bit `b` giving sign `(-1)**b` (FIPS
+    204's convention: a set bit means -1)."""
+    needed = fixed_weight_ternary_bytes_needed(weight, degree, fail_prob)  # validates params
+    buf = _require_byte_stream(data, needed, "fixed_weight_ternary")
+    rounds, sign_byte_count, _ = _ternary_layout(weight, degree, fail_prob)
+
+    chunks = buf[: needed - sign_byte_count].view(np.dtype("<u8")).reshape(weight, rounds)
+    sign_bits = np.unpackbits(buf[needed - sign_byte_count:], bitorder="little")[:weight]
+    signs = np.where(sign_bits == 1, -1, 1).astype(np.int64)
+
+    # Accept phase, vectorized across positions; only the walk below is
+    # inherently sequential.
+    moduli = np.arange(degree - weight + 1, degree + 1, dtype=np.uint64)
+    bounds = np.array([_max_accepted_chunk(m) for m in range(degree - weight + 1, degree + 1)],
+                      dtype=np.uint64)
+    accepted = chunks <= bounds[:, None]
+    usable = accepted.any(axis=1)
+    if not usable.all():
+        position = degree - weight + int(np.argmin(usable))
+        raise RuntimeError(
+            f"fixed_weight_ternary: position {position} rejected all {rounds} of "
+            f"its candidate chunks — on honestly random bytes the whole draw "
+            f"fails with probability <= {fail_prob!r}, so suspect the stream "
+            "(or a caller's slicing), not bad luck."
+        )
+    draws = chunks[np.arange(weight), np.argmax(accepted, axis=1)] % moduli
+
+    coeffs = np.zeros(degree, dtype=np.int64)
+    for idx, i in enumerate(range(degree - weight, degree)):
+        j = int(draws[idx])
+        coeffs[i] = coeffs[j]
+        coeffs[j] = signs[idx]
+    return coeffs
