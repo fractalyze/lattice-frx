@@ -32,9 +32,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 
 
-def _require_shape(log_base: int, num_digits: int, op: str) -> None:
+def _require_log_base(log_base: int, op: str) -> None:
     if log_base < 1:
         raise ValueError(f"{op}: log_base must be >= 1, got {log_base}")
+
+
+def _require_shape(log_base: int, num_digits: int, op: str) -> None:
+    _require_log_base(log_base, op)
     if num_digits < 0:
         raise ValueError(f"{op}: num_digits must be >= 0, got {num_digits}")
 
@@ -84,7 +88,7 @@ def decompose_unsigned(value: int, log_base: int, num_digits: int) -> list[int]:
 
 def recompose(digits: Iterable[int], log_base: int) -> int:
     """`Σ dᵢ·2^{iw}` — the shared inverse of both conventions."""
-    _require_shape(log_base, 0, "recompose")
+    _require_log_base(log_base, "recompose")
     return sum(int(d) << (log_base * i) for i, d in enumerate(digits))
 
 
@@ -96,9 +100,7 @@ def decompose_vector(
     orientation a gadget consumer feeds key switching or a digit-decomposed
     witness."""
     per_value = [decompose(v, log_base, num_digits) for v in values]
-    if not per_value:
-        return [[] for _ in range(num_digits)]
-    return [list(row) for row in zip(*per_value)]
+    return [[digits[i] for digits in per_value] for i in range(num_digits)]
 
 
 def recompose_vector(rows: Sequence[Sequence[int]], log_base: int) -> list[int]:
