@@ -205,26 +205,23 @@ def _ntt_backward(vec: list[int], q: int, roots: list[int], n_inv: int) -> list[
     return [(x * n_inv) % q for x in p2]
 
 
-class HostRnsRing:
-    """The RNS negacyclic ring `Z[X]/(X^d + 1)` over `prod(q_moduli)`, in
-    lattigo's own NTT table/output order (Standard NTT, `NthRoot = 2*d`).
+class _HostRingBase:
+    """The modulus-shape-agnostic half of a host negacyclic ring: the
+    `(limbs, d)` uint64 public contract, exact-Python-int internals, and
+    every operation that only needs coefficient arithmetic mod each limb
+    (add/sub/neg, Galois, signed embedding, balanced lift). Subclasses add
+    the multiplication story their modulus shape allows — `HostRnsRing`
+    via the NTT (fully-splitting limbs), `HostSplitRing`
+    (`lattice_frx/split_ring.py`) via coefficient-domain convolution
+    (partial-split limbs). `_op_prefix` names the subclass in contract
+    errors, which tests pin."""
 
-    Public arrays are `(limbs, d)` `dtype=np.uint64` numpy arrays,
-    standard (not Montgomery) form, every residue canonical (`< q_l` per
-    limb) — see the module docstring's "Public contract" section.
-    `ntt`/`intt` expect/produce coefficients already reduced mod each
-    limb's modulus (as `from_signed` and the other operations below
-    always leave them); `_coerce` additionally reduces input defensively
-    once it's converted to the internal object-dtype representation.
-    """
-
-    backend = "reference"
+    _op_prefix = "HostRing"
 
     def __init__(self, q_moduli, d: int):
         self.q_moduli: tuple[int, ...] = tuple(int(q) for q in q_moduli)
         self.d = d
         self._q_col = np.array(self.q_moduli, dtype=object)[:, None]
-        self._tables = [_generate_ntt_table(q, d) for q in self.q_moduli]
 
     def _coerce(self, a: np.ndarray, op: str) -> np.ndarray:
         """Boundary for the public `(limbs, d)` uint64 contract (module
@@ -232,7 +229,7 @@ class HostRnsRing:
         converted into an object-dtype array of exact Python ints for the
         internal math.
         """
-        require_canonical(a, self.q_moduli, f"RnsRing.{op}")
+        require_canonical(a, self.q_moduli, f"{self._op_prefix}.{op}")
         return a.astype(object)
 
     def _reduce(self, arr: np.ndarray) -> np.ndarray:
@@ -243,24 +240,6 @@ class HostRnsRing:
         lossless by construction (moduli fit in uint64; see module
         docstring)."""
         return (arr % self._q_col).astype(np.uint64)
-
-    def ntt(self, a: np.ndarray) -> np.ndarray:
-        a = self._coerce(a, "ntt")
-        rows = []
-        for i, q in enumerate(self.q_moduli):
-            roots_forward, _, _ = self._tables[i]
-            vec = [int(x) % q for x in a[i]]
-            rows.append(_ntt_forward(vec, q, roots_forward))
-        return np.array(rows, dtype=np.uint64)
-
-    def intt(self, a: np.ndarray) -> np.ndarray:
-        a = self._coerce(a, "intt")
-        rows = []
-        for i, q in enumerate(self.q_moduli):
-            _, roots_backward, n_inv = self._tables[i]
-            vec = [int(x) % q for x in a[i]]
-            rows.append(_ntt_backward(vec, q, roots_backward, n_inv))
-        return np.array(rows, dtype=np.uint64)
 
     def add(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a = self._coerce(a, "add")
@@ -287,37 +266,6 @@ class HostRnsRing:
         for i, (j, neg) in enumerate(zip(dest, negate)):
             out[:, j] = -a[:, i] if neg else a[:, i]
         return self._reduce(out)
-
-    def mul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        """Elementwise NTT-domain product (`MulCoeffsMontgomery`
-        semantics, Montgomery fold dropped)."""
-        a = self._coerce(a, "mul")
-        b = self._coerce(b, "mul")
-        return self._reduce(a * b)
-
-    def mul_add(self, a: np.ndarray, b: np.ndarray, acc: np.ndarray) -> np.ndarray:
-        """`acc + a*b`, elementwise NTT-domain (`MulCoeffsMontgomeryThenAdd`)."""
-        a = self._coerce(a, "mul_add")
-        b = self._coerce(b, "mul_add")
-        acc = self._coerce(acc, "mul_add")
-        return self._reduce(acc + a * b)
-
-    def mul_scalar(self, a: np.ndarray, s: int) -> np.ndarray:
-        """`a*s` (lattigo `MulRNSScalarMontgomery`, Montgomery fold
-        dropped): `s` is a single scalar shared across every limb, reduced
-        mod each limb's own modulus by the `%` below -- the same
-        shared-scalar convention as `mul_scalar_then_sub` below, just
-        without the accumulate-and-subtract."""
-        a = self._coerce(a, "mul_scalar")
-        return self._reduce(a * s)
-
-    def mul_scalar_then_sub(self, a: np.ndarray, s: int, acc: np.ndarray) -> np.ndarray:
-        """`acc - a*s` (lattigo `MulScalarThenSub`, operations.go):
-        `s` is a single scalar shared across every limb, reduced mod each
-        limb's own modulus by the `%` below."""
-        a = self._coerce(a, "mul_scalar_then_sub")
-        acc = self._coerce(acc, "mul_scalar_then_sub")
-        return self._reduce(acc - a * s)
 
     def from_signed(self, vals) -> np.ndarray:
         """Broadcast a length-`d` sequence of (possibly negative,
@@ -375,3 +323,73 @@ class HostRnsRing:
         half = q0 // 2
         row = a[0]
         return np.array([v - q0 if v > half else v for v in row], dtype=np.int64)
+
+
+class HostRnsRing(_HostRingBase):
+    """The RNS negacyclic ring `Z[X]/(X^d + 1)` over `prod(q_moduli)`, in
+    lattigo's own NTT table/output order (Standard NTT, `NthRoot = 2*d`).
+
+    Public arrays are `(limbs, d)` `dtype=np.uint64` numpy arrays,
+    standard (not Montgomery) form, every residue canonical (`< q_l` per
+    limb) — see the module docstring's "Public contract" section.
+    `ntt`/`intt` expect/produce coefficients already reduced mod each
+    limb's modulus (as `from_signed` and the other operations below
+    always leave them); `_coerce` additionally reduces input defensively
+    once it's converted to the internal object-dtype representation.
+    """
+
+    backend = "reference"
+    _op_prefix = "RnsRing"
+
+    def __init__(self, q_moduli, d: int):
+        super().__init__(q_moduli, d)
+        self._tables = [_generate_ntt_table(q, d) for q in self.q_moduli]
+
+    def ntt(self, a: np.ndarray) -> np.ndarray:
+        a = self._coerce(a, "ntt")
+        rows = []
+        for i, q in enumerate(self.q_moduli):
+            roots_forward, _, _ = self._tables[i]
+            vec = [int(x) % q for x in a[i]]
+            rows.append(_ntt_forward(vec, q, roots_forward))
+        return np.array(rows, dtype=np.uint64)
+
+    def intt(self, a: np.ndarray) -> np.ndarray:
+        a = self._coerce(a, "intt")
+        rows = []
+        for i, q in enumerate(self.q_moduli):
+            _, roots_backward, n_inv = self._tables[i]
+            vec = [int(x) % q for x in a[i]]
+            rows.append(_ntt_backward(vec, q, roots_backward, n_inv))
+        return np.array(rows, dtype=np.uint64)
+
+    def mul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        """Elementwise NTT-domain product (`MulCoeffsMontgomery`
+        semantics, Montgomery fold dropped)."""
+        a = self._coerce(a, "mul")
+        b = self._coerce(b, "mul")
+        return self._reduce(a * b)
+
+    def mul_add(self, a: np.ndarray, b: np.ndarray, acc: np.ndarray) -> np.ndarray:
+        """`acc + a*b`, elementwise NTT-domain (`MulCoeffsMontgomeryThenAdd`)."""
+        a = self._coerce(a, "mul_add")
+        b = self._coerce(b, "mul_add")
+        acc = self._coerce(acc, "mul_add")
+        return self._reduce(acc + a * b)
+
+    def mul_scalar(self, a: np.ndarray, s: int) -> np.ndarray:
+        """`a*s` (lattigo `MulRNSScalarMontgomery`, Montgomery fold
+        dropped): `s` is a single scalar shared across every limb, reduced
+        mod each limb's own modulus by the `%` below -- the same
+        shared-scalar convention as `mul_scalar_then_sub` below, just
+        without the accumulate-and-subtract."""
+        a = self._coerce(a, "mul_scalar")
+        return self._reduce(a * s)
+
+    def mul_scalar_then_sub(self, a: np.ndarray, s: int, acc: np.ndarray) -> np.ndarray:
+        """`acc - a*s` (lattigo `MulScalarThenSub`, operations.go):
+        `s` is a single scalar shared across every limb, reduced mod each
+        limb's own modulus by the `%` below."""
+        a = self._coerce(a, "mul_scalar_then_sub")
+        acc = self._coerce(acc, "mul_scalar_then_sub")
+        return self._reduce(acc - a * s)
