@@ -1,10 +1,8 @@
-"""The norm definitions, and the tie the two reconstructions disagree on.
+"""What the two-line norms actually pin: exactness, conventions, and the tie.
 
-The functions are two lines each; what these tests pin is the contract around
-them: exact integers all the way (a numpy `int64` square would overflow
-silently where the exact path cannot), the empty-input convention, and — the
-reason the functions take a lift instead of residues — the demonstrated
-one-off between the two reconstructions' norms at exactly `Q/2`.
+Exact integers all the way (a numpy `int64` square wraps where the exact path
+cannot), the empty-input convention, and the `Q/2` one-off between the two
+reconstructions; the lift-not-residues rationale itself lives in `norms.py`.
 """
 
 import random
@@ -45,23 +43,14 @@ def test_exactness_survives_numpy_int64_input() -> None:
 
 
 def test_the_two_reconstructions_norm_the_tie_one_apart() -> None:
-    """Why these functions take a lift, not residues.
-
-    At exactly `x == Q>>1` the two ported reconstructions disagree —
-    `reconstruct_centered` centers it to `-(Q+1)/2`, the mixed-radix reading
-    leaves it at `(Q-1)/2` — so the *norm of the same residues* differs by
-    one depending on the reading. A norm that took residues would have to
-    crown one reading as "the" norm; taking the lift keeps the choice at the
-    call site, where `rns.py` already documents it.
-    """
+    """The one-off the two readings produce at exactly `Q/2` — the reason
+    the norms take a lift, not residues (rationale in `norms.py`)."""
     q_moduli = (5, 7)
     Q = 35
-    tie = Q >> 1  # 17
-    coeffs = np.array([[tie % q] for q in q_moduli], dtype=np.uint64)
+    coeffs = rns.set_big_coeffs([Q >> 1], q_moduli)
 
     centered = rns.reconstruct_centered(coeffs, q_moduli)
     mixed = rns.reconstruct_signed_mixed_radix(coeffs, q_moduli)
 
     assert norms.linf(centered) == (Q + 1) // 2  # 18: centered to -18
     assert norms.linf(mixed) == (Q - 1) // 2  # 17: left positive
-    assert norms.linf(centered) - norms.linf(mixed) == 1
