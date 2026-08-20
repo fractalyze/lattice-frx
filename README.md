@@ -97,6 +97,13 @@ is asymmetric on purpose, pinned and tested at its exact endpoints —
 plus the textbook unsigned form, over an already-reconstructed lift,
 exact integers only.
 
+### `norms.py` — the measurement security bounds are stated in
+
+ℓ∞ and squared ℓ2 over an already-reconstructed balanced lift, exact
+integers only. They take the lift rather than residues so the caller's
+choice between the two reconstructions — which disagree at exactly
+`Q/2` — stays visible at the call site.
+
 ### `primes.py`, `canonical.py`
 
 NTT-friendly prime search, and the array contract every module above

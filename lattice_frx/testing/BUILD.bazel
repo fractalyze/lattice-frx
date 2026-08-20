@@ -47,6 +47,16 @@ pytest_test(
 )
 
 pytest_test(
+    name = "norms_test",
+    size = "small",
+    srcs = ["norms_test.py"],
+    deps = [
+        "//lattice_frx",
+        "@lattice_frx_pip//numpy",
+    ],
+)
+
+pytest_test(
     name = "rns_test",
     size = "small",
     srcs = ["rns_test.py"],
