@@ -86,7 +86,14 @@ import numpy as np
 import zk_dtypes
 from frx import lax
 
-from lattice_frx.roots import bit_reverse, prime_factors, primitive_root
+from lattice_frx.roots import (
+    bit_reverse,
+    galois_map,
+    normalize_galois_k,
+    prime_factors,
+    primitive_root,
+    slot_exponents,
+)
 
 
 class Coeff(NamedTuple):
@@ -157,6 +164,11 @@ class RnsRing:
         self._bit_reverse = np.array(
             [bit_reverse(i, (d - 1).bit_length()) for i in range(d)], dtype=np.int32
         )
+        # Per-`k` gather/sign and permutation tables for the two `galois`
+        # forms — trace-time constants, built lazily because most rings
+        # never rotate.
+        self._galois_tables: dict[int, tuple[Any, Any]] = {}
+        self._galois_eval_perms: dict[int, Any] = {}
 
     def _limbs_from_host(self, arr: np.ndarray) -> tuple[Any, ...]:
         """The host contract's `(limbs, d)` uint64 array as per-limb field arrays.
@@ -260,6 +272,61 @@ class RnsRing:
     def neg(self, a: _E) -> _E:
         domain = _same_domain("neg", a)
         return domain(tuple(-x for x in a.limbs))
+
+    def galois(self, a: Coeff, k: int) -> Coeff:
+        """`σ_k : X ↦ X^k` on coefficients — one gather and one sign-select
+        per limb, from `roots.galois_map`'s action inverted into a `take`
+        table. Conformance against the host oracle is what pins it."""
+        _require_domain("galois", Coeff, a)
+        src, negate = self._galois_table(k)
+        gathered = tuple(fnp.take(limb, src, axis=-1) for limb in a.limbs)
+        return Coeff(tuple(fnp.where(negate, -g, g) for g in gathered))
+
+    def galois_eval(self, a: Eval, k: int) -> Eval:
+        """`σ_k` without leaving the NTT domain: a pure slot permutation.
+
+        Slot `j` of the contract's order holds the evaluation at `ψ^{e(j)}`
+        (`roots.slot_exponents`), so output slot `j` reads the input slot
+        holding `ψ^{k·e(j)}`. Which `2d`-th root plays `ψ` cancels out of
+        the permutation (any two differ by an odd unit `c`, and `e ↦ c·e`
+        commutes with `e ↦ k·e`); that the closed-form exponent table really
+        is the pinned order's is re-derived from the host oracle in
+        `ring_test`, not trusted."""
+        _require_domain("galois_eval", Eval, a)
+        perm = self._galois_eval_perm(k)
+        return Eval(tuple(fnp.take(limb, perm, axis=-1) for limb in a.limbs))
+
+    def _galois_table(self, k: int):
+        """`(src, negate)` for `σ_k` as a gather: output index `m` reads
+        source `src[m]`, negated where `negate[m]` — `galois_map`'s forward
+        action inverted by two numpy scatters. One bool mask serves every
+        limb; the sign is a `where`, not per-limb sign arrays."""
+        key = normalize_galois_k(self.d, k)
+        if key not in self._galois_tables:
+            dest, negate = galois_map(self.d, key)
+            src = np.empty(self.d, dtype=np.int32)
+            src[dest] = np.arange(self.d, dtype=np.int32)
+            negate_at_dest = np.zeros(self.d, dtype=bool)
+            negate_at_dest[dest] = negate
+            self._galois_tables[key] = (src, negate_at_dest)
+        return self._galois_tables[key]
+
+    def _galois_eval_perm(self, k: int):
+        """Both directions of the slot↔exponent map are closed-form
+        (`e = 2·brv + 1` and its inverse `t ↦ brv((t-1)/2)`), so the
+        permutation is pure index arithmetic — no table beyond the cached
+        result."""
+        key = normalize_galois_k(self.d, k)
+        if key not in self._galois_eval_perms:
+            bits = (self.d - 1).bit_length()
+            self._galois_eval_perms[key] = np.array(
+                [
+                    bit_reverse((((key * e) % (2 * self.d)) - 1) >> 1, bits)
+                    for e in slot_exponents(self.d)
+                ],
+                dtype=np.int32,
+            )
+        return self._galois_eval_perms[key]
 
     def mul(self, a: Eval, b: Eval) -> Eval:
         """Pointwise — the ring's multiplication in the NTT domain *only*,
