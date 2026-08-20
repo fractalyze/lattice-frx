@@ -88,10 +88,14 @@ sampling from a discrete-Laplace proposal (any σ, any real center).
 `int` because deriving it needs the caller's prover structure, which is
 scheme-specific, while nothing this package does with it is.
 
-### `primes.py`, `canonical.py`
+### `primes.py`, `canonical.py`, `norms.py`
 
-NTT-friendly prime search, and the array contract every module above
-enforces — `dtype=np.uint64`, every residue below its own limb's modulus,
+NTT-friendly prime search; the measurement security bounds are stated
+in — ℓ∞ and squared ℓ2 over an already-reconstructed balanced lift,
+exact integers only, taking the lift rather than residues so the
+caller's choice between the two reconstructions (which disagree at
+exactly `Q/2`) stays visible at the call site; and the array contract
+every module above enforces — `dtype=np.uint64`, every residue below its own limb's modulus,
 defined once with a `bool` form for callers deciding something and a
 raising form for callers about to assume it.
 

@@ -10,6 +10,7 @@ py_library(
         "__init__.py",
         "canonical.py",
         "host_ring.py",
+        "norms.py",
         "primes.py",
         "ring.py",
         "rns.py",
