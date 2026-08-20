@@ -371,22 +371,24 @@ def _rejection_slack(count: int, p_rej: float, fail_prob: float) -> int:
     return hi
 
 
-def _validate_uniform_params(count: int, modulus: int, fail_prob: float) -> None:
-    if count <= 0:
-        raise ValueError(f"count must be positive, got {count!r}")
+def _validate_uniform_params(modulus: int, count: int, fail_prob: float) -> None:
     if not 1 <= modulus < _TWO_64:
         raise ValueError(f"modulus must be in [1, 2**64), got {modulus!r}")
+    if count <= 0:
+        raise ValueError(f"count must be positive, got {count!r}")
     if not 0.0 < fail_prob < 1.0:
         raise ValueError(f"fail_prob must be in (0, 1), got {fail_prob!r}")
 
 
-def uniform_bytes_needed(count: int, modulus: int, fail_prob: float = 2.0**-128) -> int:
+def uniform_bytes_needed(modulus: int, count: int, fail_prob: float = 2.0**-128) -> int:
     """The exact byte count `uniform_from_bytes` consumes for these
     parameters — `8 * (count + slack)`, where the slack is the minimal
     rejection budget at failure probability `fail_prob` (see
-    `_rejection_slack`). Zero whenever `modulus` divides `2**64`, since no
-    chunk is ever rejected then."""
-    _validate_uniform_params(count, modulus, fail_prob)
+    `_rejection_slack`), and zero whenever `modulus` divides `2**64`,
+    since no chunk is ever rejected then. Parameters ride in the same
+    order as `uniform_from_bytes` minus the stream, as with every
+    `*_bytes_needed` companion."""
+    _validate_uniform_params(modulus, count, fail_prob)
     largest_multiple = _TWO_64 // modulus * modulus
     if largest_multiple == _TWO_64:
         return 8 * count
@@ -409,7 +411,7 @@ def uniform_from_bytes(data, modulus: int, count: int, fail_prob: float = 2.0**-
     open-ended retry, so on an honestly random stream the sampler fails
     (raises) with probability at most `fail_prob`, and never reads a
     data-dependent number of bytes."""
-    needed = uniform_bytes_needed(count, modulus, fail_prob)  # validates params
+    needed = uniform_bytes_needed(modulus, count, fail_prob)  # validates params
     buf = _require_byte_stream(data, needed, "uniform_from_bytes")
     chunks = buf.view(np.dtype("<u8"))
     largest_multiple = _TWO_64 // modulus * modulus

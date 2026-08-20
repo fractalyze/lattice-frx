@@ -260,7 +260,7 @@ def _stream(n_bytes: int, seed: int) -> bytes:
 
 def test_uniform_from_bytes_is_a_deterministic_function_of_the_bytes():
     q, count = (1 << 50) - 27, 1000
-    data = _stream(sampler.uniform_bytes_needed(count, q), seed=7)
+    data = _stream(sampler.uniform_bytes_needed(q, count), seed=7)
     a = sampler.uniform_from_bytes(data, q, count)
     b = sampler.uniform_from_bytes(data, q, count)
     assert a.dtype == np.uint64 and a.shape == (count,)
@@ -273,7 +273,7 @@ def test_uniform_from_bytes_is_a_deterministic_function_of_the_bytes():
 
 def test_uniform_from_bytes_chi_square_at_a_small_modulus():
     q, n = 17, 200_000
-    data = _stream(sampler.uniform_bytes_needed(n, q), seed=11)
+    data = _stream(sampler.uniform_bytes_needed(q, n), seed=11)
     samples = sampler.uniform_from_bytes(data, q, n)
     counts = np.bincount(samples.astype(np.int64), minlength=q)
     assert stats.chisquare(counts).pvalue > 1e-6
@@ -284,7 +284,7 @@ def test_uniform_from_bytes_ks_where_rejection_actually_bites():
     # (the largest multiple of q below 2**64 is q itself), so this exercises
     # the accept/reject path and its budget, not just the modular map.
     q, n = (1 << 63) + 11, 100_000
-    needed = sampler.uniform_bytes_needed(n, q)
+    needed = sampler.uniform_bytes_needed(q, n)
     assert needed > 8 * n  # rejection visibly inflated the budget
     samples = sampler.uniform_from_bytes(_stream(needed, 13), q, n)
     ks = stats.kstest(samples / q, "uniform")
@@ -295,7 +295,7 @@ def test_uniform_bytes_needed_budget_is_minimal_for_the_stated_fail_prob():
     # Independent cross-check of the budget computation: scipy's binomial
     # survival function, against the module's own tail evaluation.
     q, count, fail_prob = (1 << 63) + 11, 1000, 2.0**-128
-    needed = sampler.uniform_bytes_needed(count, q, fail_prob)
+    needed = sampler.uniform_bytes_needed(q, count, fail_prob)
     assert needed % 8 == 0
     attempts = needed // 8
     p_rej = 1.0 - ((1 << 64) // q) * q / 2.0**64
@@ -305,7 +305,7 @@ def test_uniform_bytes_needed_budget_is_minimal_for_the_stated_fail_prob():
 
 def test_uniform_bytes_needed_has_no_slack_when_the_modulus_divides_2_64():
     for q in (1, 1 << 32, 1 << 50):
-        assert sampler.uniform_bytes_needed(64, q) == 8 * 64
+        assert sampler.uniform_bytes_needed(q, 64) == 8 * 64
 
 
 def test_uniform_from_bytes_chunks_are_little_endian_uint64():
@@ -322,7 +322,7 @@ def test_uniform_from_bytes_chunks_are_little_endian_uint64():
 
 def test_uniform_from_bytes_requires_the_exact_byte_count():
     q, count = 17, 100
-    needed = sampler.uniform_bytes_needed(count, q)
+    needed = sampler.uniform_bytes_needed(q, count)
     for n_bytes in (needed - 8, needed + 8):
         with pytest.raises(ValueError, match="bytes"):
             sampler.uniform_from_bytes(_stream(n_bytes, 3), q, count)
@@ -333,7 +333,7 @@ def test_uniform_from_bytes_raises_when_every_chunk_is_rejected():
     # any modulus that does not divide 2**64 — so the whole budget drains and
     # the sampler must report it (probability <= fail_prob on honest bytes).
     q, count = (1 << 63) + 11, 16
-    needed = sampler.uniform_bytes_needed(count, q)
+    needed = sampler.uniform_bytes_needed(q, count)
     with pytest.raises(RuntimeError, match="uniform_from_bytes"):
         sampler.uniform_from_bytes(b"\xff" * needed, q, count)
 
@@ -341,18 +341,18 @@ def test_uniform_from_bytes_raises_when_every_chunk_is_rejected():
 @pytest.mark.parametrize("bad_modulus", [0, 1 << 64])
 def test_uniform_bytes_needed_rejects_a_bad_modulus(bad_modulus):
     with pytest.raises(ValueError, match="modulus"):
-        sampler.uniform_bytes_needed(4, bad_modulus)
+        sampler.uniform_bytes_needed(bad_modulus, 4)
 
 
 @pytest.mark.parametrize("bad_count", [0, -1])
 def test_uniform_bytes_needed_rejects_a_non_positive_count(bad_count):
     with pytest.raises(ValueError, match="count"):
-        sampler.uniform_bytes_needed(bad_count, 17)
+        sampler.uniform_bytes_needed(17, bad_count)
 
 
 def test_uniform_from_bytes_rejects_a_non_byte_buffer():
     q, count = 17, 4
-    needed = sampler.uniform_bytes_needed(count, q)
+    needed = sampler.uniform_bytes_needed(q, count)
     with pytest.raises(TypeError, match="uint8"):
         sampler.uniform_from_bytes(np.zeros(needed, dtype=np.uint32), q, count)
 
