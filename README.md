@@ -91,6 +91,13 @@ sampling from a discrete-Laplace proposal (any σ, any real center).
 `int` because deriving it needs the caller's prover structure, which is
 scheme-specific, while nothing this package does with it is.
 
+### `norms.py` — the measurement security bounds are stated in
+
+ℓ∞ and squared ℓ2 over an already-reconstructed balanced lift, exact
+integers only. They take the lift rather than residues so the caller's
+choice between the two reconstructions — which disagree at exactly
+`Q/2` — stays visible at the call site.
+
 ### `primes.py`, `canonical.py`
 
 NTT-friendly prime search, and the array contract every module above
