@@ -13,6 +13,11 @@ Two layers share this module:
   at the same (rank, bits) — a consumer must pick the one its reference
   uses rather than assuming they agree.
 
+- `find_nearest_split_primes` / `split_root` — the partial-split family
+  (`q ≡ 5 (mod 8)`), the modulus shape `split_ring.py` hosts and the NTT
+  walk can never produce; see those functions for why the two families
+  are mutually exclusive.
+
 `MAX_MODULUS` (2**50) is part of the ported contract — the crt stack caps
 every modulus at `num.MaxModulus` (math/num/mod.go), and the walk's
 overflow/underflow errors key off it.

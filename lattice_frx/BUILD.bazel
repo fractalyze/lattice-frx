@@ -17,6 +17,7 @@ py_library(
         "rns.py",
         "roots.py",
         "sampler.py",
+        "split_ring.py",
     ],
     visibility = ["//visibility:public"],
     deps = [
