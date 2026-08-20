@@ -88,6 +88,15 @@ sampling from a discrete-Laplace proposal (any σ, any real center).
 `int` because deriving it needs the caller's prover structure, which is
 scheme-specific, while nothing this package does with it is.
 
+### `gadget.py` — digit decomposition
+
+The digit view against the gadget vector `(1, 2^w, 2^{2w}, …)` that FHE
+key switching, digit-decomposed proofs, and trapdoor constructions all
+share. Balanced digits in `[-B/2, B/2)` — whose representable interval
+is asymmetric on purpose, pinned and tested at its exact endpoints —
+plus the textbook unsigned form, over an already-reconstructed lift,
+exact integers only.
+
 ### `primes.py`, `canonical.py`
 
 NTT-friendly prime search, and the array contract every module above

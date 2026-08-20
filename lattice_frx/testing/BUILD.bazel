@@ -14,6 +14,13 @@ pytest_test(
 )
 
 pytest_test(
+    name = "gadget_test",
+    size = "small",
+    srcs = ["gadget_test.py"],
+    deps = ["//lattice_frx"],
+)
+
+pytest_test(
     name = "host_ring_conformance_test",
     size = "small",
     srcs = ["host_ring_conformance_test.py"],
