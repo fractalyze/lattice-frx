@@ -375,9 +375,10 @@ def test_fixed_weight_ternary_position_marginals_chi_square():
     # the safe direction for a p > 1e-6 gate.
     weight, degree, n = 13, 32, 20_000
     needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    streams = np.random.default_rng(100_000).integers(0, 256, (n, needed), dtype=np.uint8)
     counts = np.zeros(degree, dtype=np.int64)
     for k in range(n):
-        counts += sampler.fixed_weight_ternary(_stream(needed, 100_000 + k), weight, degree) != 0
+        counts += sampler.fixed_weight_ternary(streams[k], weight, degree) != 0
     assert counts.sum() == n * weight
     assert stats.chisquare(counts).pvalue > 1e-6
 
@@ -385,10 +386,11 @@ def test_fixed_weight_ternary_position_marginals_chi_square():
 def test_fixed_weight_ternary_sign_balance_and_position_independence():
     weight, degree, n = 13, 32, 20_000
     needed = sampler.fixed_weight_ternary_bytes_needed(weight, degree)
+    streams = np.random.default_rng(200_000).integers(0, 256, (n, needed), dtype=np.uint8)
     plus = np.zeros(degree, dtype=np.int64)
     minus = np.zeros(degree, dtype=np.int64)
     for k in range(n):
-        c = sampler.fixed_weight_ternary(_stream(needed, 200_000 + k), weight, degree)
+        c = sampler.fixed_weight_ternary(streams[k], weight, degree)
         plus += c == 1
         minus += c == -1
     assert stats.binomtest(int(plus.sum()), int(plus.sum() + minus.sum()), 0.5).pvalue > 1e-6
