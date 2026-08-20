@@ -56,7 +56,7 @@ def test_the_field_carries_the_full_limb_width(rings) -> None:
     """
     _, dev = rings
     host = _random_host(1)
-    assert np.array_equal(dev.to_host(dev.from_host(host)), host)
+    assert np.array_equal(dev.to_host(dev.coeff_from_host(host)), host)
     assert max(int(v) for v in host[0]) > (1 << 32)
 
 
@@ -64,19 +64,21 @@ def test_ntt_agrees_with_the_reference(rings) -> None:
     """The order gate, transitively: the reference's order is lattigo's."""
     ref, dev = rings
     host = _random_host(2)
-    assert np.array_equal(dev.to_host(dev.ntt(dev.from_host(host))), ref.ntt(host))
+    got = dev.to_host(dev.ntt(dev.coeff_from_host(host)))
+    assert np.array_equal(got, ref.ntt(host))
 
 
 def test_intt_agrees_with_the_reference(rings) -> None:
     ref, dev = rings
     host = _random_host(3)
-    assert np.array_equal(dev.to_host(dev.intt(dev.from_host(host))), ref.intt(host))
+    got = dev.to_host(dev.intt(dev.eval_from_host(host)))
+    assert np.array_equal(got, ref.intt(host))
 
 
 def test_intt_inverts_ntt(rings) -> None:
     _, dev = rings
     host = _random_host(4)
-    element = dev.from_host(host)
+    element = dev.coeff_from_host(host)
     assert np.array_equal(dev.to_host(dev.intt(dev.ntt(element))), host)
 
 
@@ -86,7 +88,10 @@ def test_intt_inverts_ntt(rings) -> None:
 def test_arithmetic_agrees_with_the_reference(rings, op: str) -> None:
     ref, dev = rings
     a_host, b_host, c_host = _random_host(5), _random_host(6), _random_host(7)
-    a, b, c = dev.from_host(a_host), dev.from_host(b_host), dev.from_host(c_host)
+    # `mul`/`mul_add` are pointwise products, defined only in the NTT domain;
+    # everything else is domain-generic and exercised on the coefficient side.
+    embed = dev.eval_from_host if op in ("mul", "mul_add") else dev.coeff_from_host
+    a, b, c = embed(a_host), embed(b_host), embed(c_host)
     scalar = 123456789
 
     if op == "neg":
@@ -115,7 +120,7 @@ def test_from_signed_agrees_with_the_reference(rings) -> None:
 def test_to_balanced_limb0_agrees_with_the_reference(rings) -> None:
     ref, dev = rings
     host = _random_host(9)
-    got = dev.to_balanced_limb0(dev.from_host(host))
+    got = dev.to_balanced_limb0(dev.coeff_from_host(host))
     want = ref.to_balanced_limb0(host)
     assert got.dtype == np.int64
     assert np.array_equal(got, want)
@@ -134,24 +139,92 @@ def test_the_ring_is_negacyclic(rings) -> None:
 def test_the_transform_traces_as_one_computation(rings) -> None:
     """The point of the backend: `ntt` composes into a `jit` zone.
 
-    The element is a tuple of per-limb field arrays, which is a pytree already,
-    so it crosses the boundary without a registered type of its own.
+    `Coeff` and `Eval` are `NamedTuple`s over per-limb field arrays — still
+    pytrees, so they cross the boundary without a registered type of their own,
+    and the domain guard runs at trace time.
     """
     ref, dev = rings
     host = _random_host(10)
     compiled = frx.jit(dev.ntt)
-    assert np.array_equal(dev.to_host(compiled(dev.from_host(host))), ref.ntt(host))
+    got = dev.to_host(compiled(dev.coeff_from_host(host)))
+    assert np.array_equal(got, ref.ntt(host))
+
+
+def _row(batched, index: int):
+    """One element back out of a batched one, in the same domain."""
+    return type(batched)(tuple(limb[index] for limb in batched.limbs))
 
 
 def test_an_element_survives_a_vmapped_batch(rings) -> None:
     """A batch axis over elements, which is what a consumer's hot path adds."""
     ref, dev = rings
     hosts = [_random_host(11), _random_host(12), _random_host(13)]
-    stacked = tuple(
-        frx.numpy.stack([dev.from_host(h)[i] for h in hosts])
-        for i in range(len(_Q_MODULI))
+    batched = frx.jit(frx.vmap(dev.ntt))(
+        dev.stack([dev.coeff_from_host(h) for h in hosts])
     )
-    batched = frx.jit(frx.vmap(dev.ntt))(stacked)
     for index, host in enumerate(hosts):
-        got = dev.to_host(tuple(limb[index] for limb in batched))
-        assert np.array_equal(got, ref.ntt(host))
+        assert np.array_equal(dev.to_host(_row(batched, index)), ref.ntt(host))
+
+
+def test_a_leading_batch_axis_needs_no_vmap(rings) -> None:
+    """The batch convention directly: ops read `[..., d]` limbs as they are."""
+    ref, dev = rings
+    hosts = [_random_host(14), _random_host(15)]
+    batched = dev.ntt(dev.stack([dev.coeff_from_host(h) for h in hosts]))
+    for index, host in enumerate(hosts):
+        assert np.array_equal(dev.to_host(_row(batched, index)), ref.ntt(host))
+
+
+def test_domain_confusion_is_a_typeerror(rings) -> None:
+    """The reason the element is two types instead of one tuple."""
+    _, dev = rings
+    coeff = dev.coeff_from_host(_random_host(16))
+    evaled = dev.ntt(coeff)
+
+    with pytest.raises(TypeError):
+        dev.mul(coeff, coeff)  # pointwise in the coefficient domain: not mul
+    with pytest.raises(TypeError):
+        dev.add(coeff, evaled)  # mixed domains never add
+    with pytest.raises(TypeError):
+        dev.ntt(evaled)  # already transformed
+    with pytest.raises(TypeError):
+        dev.intt(coeff)  # not transformed yet
+    with pytest.raises(TypeError):
+        dev.to_balanced_limb0(evaled)  # a balanced lift of NTT values
+    with pytest.raises(TypeError):
+        dev.mul(coeff.limbs, coeff.limbs)  # a bare tuple asserts no domain
+    with pytest.raises(TypeError):
+        dev.stack([coeff, evaled])  # a batch never mixes domains
+
+
+def test_matvec_agrees_with_elementwise_mul_add(rings) -> None:
+    """`A·s` per the module convention equals the same sum taken one ring
+    element at a time through the reference."""
+    ref, dev = rings
+    m, k = 3, 2
+    a_hosts = [[_random_host(20 + i * k + j) for j in range(k)] for i in range(m)]
+    s_hosts = [_random_host(30 + j) for j in range(k)]
+
+    mat = dev.stack(
+        [dev.stack([dev.eval_from_host(h) for h in row]) for row in a_hosts]
+    )
+    vec = dev.stack([dev.eval_from_host(h) for h in s_hosts])
+    got = dev.matvec(mat, vec)
+
+    for i in range(m):
+        want = ref.mul(a_hosts[i][0], s_hosts[0])
+        for j in range(1, k):
+            want = ref.mul_add(a_hosts[i][j], s_hosts[j], want)
+        assert np.array_equal(dev.to_host(_row(got, i)), want)
+
+
+def test_matvec_rejects_a_shape_mismatch(rings) -> None:
+    _, dev = rings
+    a, b, c = (dev.eval_from_host(_random_host(s)) for s in (40, 41, 42))
+    with pytest.raises(ValueError):
+        dev.matvec(a, a)  # both rank-1: no `m` axis to contract
+    with pytest.raises(ValueError):
+        # k = 1 against k' = 2: a size-1 axis would broadcast straight past a
+        # rank check into well-shaped wrong values, so the guard checks the
+        # contracted extent itself.
+        dev.matvec(dev.stack([dev.stack([a])]), dev.stack([b, c]))

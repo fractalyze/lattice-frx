@@ -48,6 +48,16 @@ the same twiddle table and runs the same butterfly cores — see the module
 docstring for why the two references' primitive-root walks provably land
 on the same root for any NTT-friendly limb.
 
+The traced element comes in two container types, `Coeff` and `Eval`,
+because which domain a value is in is part of what it is — pointwise
+`mul` is the ring's multiplication only in the NTT domain — and the
+domain is static at trace time, so a type carries it rather than a
+lattigo-style runtime flag. Limb arrays may carry leading batch axes
+(`[..., d]`); `stack` assembles such batches and `matvec` reads them as
+the module layer (MLWE's `A·s`). The full rationale, including the
+deliberately rejected ring-element-as-dtype alternative, is in
+[docs/ring-representation.md](docs/ring-representation.md).
+
 ### `rns.py` — CRT reconstruction and basis conversion
 
 A useful `Q` runs to 50–200+ bits, past a machine word. So a value is
