@@ -29,6 +29,21 @@ each module is here, and where the repo sits relative to the other
   every boundary check, and was still unusable by the second consumer,
   which silently reimplemented it instead. That failure mode is invisible
   to an import-graph check, so it has to be a review habit.
+- **The domain is a type, not a flag.** Traced ring ops take `Coeff` or
+  `Eval`, never bare limb tuples; `mul`/`mul_add`/`matvec` are `Eval`-only,
+  `to_balanced_limb0` is `Coeff`-only, and the embedding constructors are
+  named for the domain the caller asserts (`coeff_from_host` /
+  `eval_from_host`). Do not add a runtime `IsNTT`-style flag (lattigo's
+  move) — the domain is static at trace time and a flag branch splits the
+  trace for information the graph already has.
+- **No ring-element dtype, and the module layer is a shape convention.**
+  The dtype boundary sits at the field (`zk_dtypes.prime_field`); a ring
+  element is a typed tuple of per-limb `[..., d]` arrays, a module vector is
+  the `[k, d]` case of the same limbs, and `A·s` is `matvec`, not a new
+  type. The rejection rationale and its revisit signal (a *second* consumer
+  that provably cannot live on typed tuples) are in
+  [docs/ring-representation.md](docs/ring-representation.md) — read it
+  before proposing either a `negacyclic_ring` dtype or a `Module` class.
 - **The array contract has one definition**, in `canonical.py`
   (`is_canonical` to ask, `require_canonical` to enforce): `dtype=uint64`,
   every residue below its own limb's modulus. Call it; never re-hand-write
