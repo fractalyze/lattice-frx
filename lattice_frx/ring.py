@@ -86,7 +86,14 @@ import numpy as np
 import zk_dtypes
 from frx import lax
 
-from lattice_frx.roots import bit_reverse, prime_factors, primitive_root
+from lattice_frx import host_ring
+from lattice_frx.roots import (
+    bit_reverse,
+    galois_map,
+    normalize_galois_k,
+    prime_factors,
+    primitive_root,
+)
 
 
 class Coeff(NamedTuple):
@@ -157,6 +164,12 @@ class RnsRing:
         self._bit_reverse = np.array(
             [bit_reverse(i, (d - 1).bit_length()) for i in range(d)], dtype=np.int32
         )
+        # Per-`k` gather/sign structures for the two `galois` forms, and the
+        # slot-exponent table they share — all trace-time constants, built
+        # lazily because most rings never rotate.
+        self._galois_tables: dict[int, tuple[Any, tuple[Any, ...]]] = {}
+        self._galois_eval_perms: dict[int, Any] = {}
+        self._slot_exponents_cache: list[int] | None = None
 
     def _limbs_from_host(self, arr: np.ndarray) -> tuple[Any, ...]:
         """The host contract's `(limbs, d)` uint64 array as per-limb field arrays.
@@ -260,6 +273,82 @@ class RnsRing:
     def neg(self, a: _E) -> _E:
         domain = _same_domain("neg", a)
         return domain(tuple(-x for x in a.limbs))
+
+    def galois(self, a: Coeff, k: int) -> Coeff:
+        """`σ_k : X ↦ X^k` on coefficients — one gather and one sign-multiply
+        per limb, from `roots.galois_map`'s action inverted into a `take`
+        table. Conformance against the host oracle is what pins it."""
+        _require_domain("galois", Coeff, a)
+        src, signs = self._galois_table(k)
+        return Coeff(
+            tuple(
+                fnp.take(limb, src, axis=-1) * sign
+                for limb, sign in zip(a.limbs, signs)
+            )
+        )
+
+    def galois_eval(self, a: Eval, k: int) -> Eval:
+        """`σ_k` without leaving the NTT domain: a pure slot permutation.
+
+        Slot `j` of the contract's order holds the evaluation at `ψ^{e(j)}`,
+        so output slot `j` reads the input slot holding `ψ^{k·e(j)}`. The
+        exponent table `e` is derived once per ring by transforming the
+        monomial `X` through the host oracle — whose output order *is* the
+        contract — and taking discrete logs base `ψ`: the conjugation with
+        the order adapter, done numerically rather than trusted. Which
+        `2d`-th root plays `ψ` cancels out of the permutation (any two differ
+        by an odd unit `c`, and `e ↦ c·e` commutes with `e ↦ k·e`)."""
+        _require_domain("galois_eval", Eval, a)
+        perm = self._galois_eval_perm(k)
+        return Eval(tuple(fnp.take(limb, perm, axis=-1) for limb in a.limbs))
+
+    def _galois_table(self, k: int):
+        key = normalize_galois_k(self.d, k)
+        if key not in self._galois_tables:
+            dest, negate = galois_map(self.d, key)
+            src = np.empty(self.d, dtype=np.int32)
+            negate_at_dest = np.empty(self.d, dtype=bool)
+            for i, (j, neg) in enumerate(zip(dest, negate)):
+                src[j] = i
+                negate_at_dest[j] = neg
+            signs = tuple(
+                fnp.asarray(
+                    np.where(negate_at_dest, q - 1, 1).astype(np.uint64).astype(field)
+                )
+                for q, field in zip(self.q_moduli, self.fields)
+            )
+            self._galois_tables[key] = (src, signs)
+        return self._galois_tables[key]
+
+    def _slot_exponents(self) -> list[int]:
+        """`e(j)` for every slot of the contract's order, via the host ring.
+
+        The slot values of `ntt(X)` *are* the roots in slot order, so one
+        host transform of the monomial plus a discrete log over the (size
+        `2d`, cyclic) root group reads the table off exactly. Limb 0 speaks
+        for all limbs: the table order is index-structural, not
+        modulus-dependent — which `ring_test`'s eval-equivalence property
+        re-checks on every limb anyway."""
+        if self._slot_exponents_cache is None:
+            q = self.q_moduli[0]
+            psi = pow(self._generators[0], (q - 1) // (2 * self.d), q)
+            mono = np.zeros((1, self.d), dtype=np.uint64)
+            mono[0, 1] = 1
+            slots = host_ring.HostRnsRing((q,), self.d).ntt(mono)[0]
+            dlog = {pow(psi, t, q): t for t in range(2 * self.d)}
+            self._slot_exponents_cache = [dlog[int(v)] for v in slots]
+        return self._slot_exponents_cache
+
+    def _galois_eval_perm(self, k: int):
+        key = normalize_galois_k(self.d, k)
+        if key not in self._galois_eval_perms:
+            exponents = self._slot_exponents()
+            slot_of = {e: j for j, e in enumerate(exponents)}
+            self._galois_eval_perms[key] = np.array(
+                [slot_of[(key * e) % (2 * self.d)] for e in exponents],
+                dtype=np.int32,
+            )
+        return self._galois_eval_perms[key]
 
     def mul(self, a: Eval, b: Eval) -> Eval:
         """Pointwise — the ring's multiplication in the NTT domain *only*,

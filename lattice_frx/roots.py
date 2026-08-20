@@ -91,3 +91,31 @@ def bit_reverse(x: int, bits: int) -> int:
         r = (r << 1) | (x & 1)
         x >>= 1
     return r
+
+
+def normalize_galois_k(d: int, k: int) -> int:
+    """`k` reduced mod `2d`, required odd. `gcd(k, 2d) = 1` is what makes
+    `σ_k` an automorphism, and `2d` is a power of two, so odd is the whole
+    condition; the even case is a projection, not a ring map, and raising
+    beats silently folding it."""
+    k = int(k) % (2 * d)
+    if k % 2 == 0:
+        raise ValueError(f"galois: k must be odd mod {2 * d}, got {k}")
+    return k
+
+
+def galois_map(d: int, k: int) -> tuple[list[int], list[bool]]:
+    """The coefficient-index action of `σ_k : X ↦ X^k` on `Z[X]/(X^d + 1)`.
+
+    For source index `i`, coefficient `a_i` lands at `i·k mod 2d` folded
+    into `[0, d)`, negated (`negate[i]`) when the fold crossed `d` —
+    `X^d = -1`. Host-side integers like everything else here: both rings
+    build their own gather/sign structures from this one map.
+    """
+    k = normalize_galois_k(d, k)
+    dest, negate = [], []
+    for i in range(d):
+        j = (i * k) % (2 * d)
+        dest.append(j - d if j >= d else j)
+        negate.append(j >= d)
+    return dest, negate

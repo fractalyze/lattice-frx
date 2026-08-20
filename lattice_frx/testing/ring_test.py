@@ -228,3 +228,70 @@ def test_matvec_rejects_a_shape_mismatch(rings) -> None:
         # rank check into well-shaped wrong values, so the guard checks the
         # contracted extent itself.
         dev.matvec(dev.stack([dev.stack([a])]), dev.stack([b, c]))
+
+
+@pytest.mark.parametrize("k", [1, 3, 5, 2 * _D - 1, 2 * _D + 3])
+def test_galois_agrees_with_the_reference(rings, k: int) -> None:
+    """The automorphism against the host oracle, `k` normalized mod `2d`."""
+    ref, dev = rings
+    host = _random_host(50)
+    got = dev.to_host(dev.galois(dev.coeff_from_host(host), k))
+    assert np.array_equal(got, ref.galois(host, k))
+
+
+def test_galois_is_a_ring_automorphism(rings) -> None:
+    """`σ_k(a·b) = σ_k(a)·σ_k(b)`, through the ring's own transform."""
+    _, dev = rings
+    k = 5
+    a = dev.coeff_from_host(_random_host(51))
+    b = dev.coeff_from_host(_random_host(52))
+    prod = dev.intt(dev.mul(dev.ntt(a), dev.ntt(b)))
+    lhs = dev.galois(prod, k)
+    rhs = dev.intt(dev.mul(dev.ntt(dev.galois(a, k)), dev.ntt(dev.galois(b, k))))
+    assert np.array_equal(dev.to_host(lhs), dev.to_host(rhs))
+
+
+def test_galois_composes_and_inverts(rings) -> None:
+    _, dev = rings
+    a = dev.coeff_from_host(_random_host(53))
+    k, j = 3, 7
+    lhs = dev.galois(dev.galois(a, k), j)
+    rhs = dev.galois(a, (k * j) % (2 * _D))
+    assert np.array_equal(dev.to_host(lhs), dev.to_host(rhs))
+    k_inv = pow(k, -1, 2 * _D)
+    round_trip = dev.galois(dev.galois(a, k), k_inv)
+    assert np.array_equal(dev.to_host(round_trip), dev.to_host(a))
+
+
+def test_galois_eval_never_leaves_the_ntt_domain(rings) -> None:
+    """The contract-order permutation: `galois_eval ∘ ntt == ntt ∘ galois`,
+    with no output permutation beyond the pinned adapter — the property that
+    fails if the slot-exponent table and the order contract ever disagree,
+    on either limb."""
+    _, dev = rings
+    a = dev.coeff_from_host(_random_host(54))
+    for k in (3, 5, 2 * _D - 1):
+        lhs = dev.galois_eval(dev.ntt(a), k)
+        rhs = dev.ntt(dev.galois(a, k))
+        assert np.array_equal(dev.to_host(lhs), dev.to_host(rhs))
+
+
+def test_galois_rejects_an_even_k_and_the_wrong_domain(rings) -> None:
+    _, dev = rings
+    a = dev.coeff_from_host(_random_host(55))
+    for k in (0, 2, 2 * _D):
+        with pytest.raises(ValueError):
+            dev.galois(a, k)
+    with pytest.raises(TypeError):
+        dev.galois(dev.ntt(a), 3)  # an NTT-domain element in the coeff op
+    with pytest.raises(TypeError):
+        dev.galois_eval(a, 3)  # a coefficient element in the eval op
+
+
+def test_galois_by_hand_at_a_tiny_ring() -> None:
+    """`d = 4`, `q = 17`: `σ_3(X) = X³` and `σ_3(X²) = X⁶ = -X²`."""
+    ref = host_mod.HostRnsRing((17,), 4)
+    x = ref.from_signed([0, 1, 0, 0])
+    assert np.array_equal(ref.galois(x, 3), ref.from_signed([0, 0, 0, 1]))
+    x_sq = ref.from_signed([0, 0, 1, 0])
+    assert np.array_equal(ref.galois(x_sq, 3), ref.from_signed([0, 0, -1, 0]))

@@ -84,7 +84,7 @@ import numpy as np
 # The array contract and the NTT's constants live in this package's shared
 # modules; `roots` holds the ones the traced ring needs identically.
 from lattice_frx.canonical import require_canonical
-from lattice_frx.roots import bit_reverse, primitive_root, prime_factors
+from lattice_frx.roots import bit_reverse, galois_map, primitive_root, prime_factors
 
 
 def _generate_ntt_table(q: int, d: int) -> tuple[list[int], list[int], int]:
@@ -275,6 +275,19 @@ class HostRnsRing:
     def neg(self, a: np.ndarray) -> np.ndarray:
         a = self._coerce(a, "neg")
         return self._reduce(-a)
+
+    def galois(self, a: np.ndarray, k: int) -> np.ndarray:
+        """`σ_k : X ↦ X^k` (odd `k`, reduced mod `2d`), one coefficient at a
+        time: `a_i` lands at `i·k mod 2d` folded into `[0, d)`, negated when
+        the fold crosses `d` (`X^d = -1`). Coefficient-domain by definition;
+        the NTT-domain action lives on the traced ring as `galois_eval`,
+        derived against this oracle."""
+        a = self._coerce(a, "galois")
+        dest, negate = galois_map(self.d, k)
+        out = np.zeros_like(a)
+        for i, (j, neg) in enumerate(zip(dest, negate)):
+            out[:, j] = -a[:, i] if neg else a[:, i]
+        return self._reduce(out)
 
     def mul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         """Elementwise NTT-domain product (`MulCoeffsMontgomery`

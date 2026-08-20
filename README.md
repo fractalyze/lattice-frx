@@ -54,7 +54,10 @@ because which domain a value is in is part of what it is — pointwise
 domain is static at trace time, so a type carries it rather than a
 lattigo-style runtime flag. Limb arrays may carry leading batch axes
 (`[..., d]`); `stack` assembles such batches and `matvec` reads them as
-the module layer (MLWE's `A·s`). The full rationale, including the
+the module layer (MLWE's `A·s`). The Galois automorphisms come in both
+domains — `galois` on coefficients, `galois_eval` as a pure slot
+permutation whose table is derived through the pinned order contract, so
+rotations never leave the NTT domain. The full rationale, including the
 deliberately rejected ring-element-as-dtype alternative, is in
 [docs/ring-representation.md](docs/ring-representation.md).
 
