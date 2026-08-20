@@ -9,6 +9,7 @@ py_library(
     srcs = [
         "__init__.py",
         "canonical.py",
+        "gadget.py",
         "host_ring.py",
         "norms.py",
         "primes.py",
