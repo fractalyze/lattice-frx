@@ -294,3 +294,15 @@ class HostRingConformanceTest(parameterized.TestCase):
 
 if __name__ == "__main__":
     absltest.main()
+
+
+class DegreeContractTest(absltest.TestCase):
+
+    def test_a_composite_degree_is_rejected_at_construction(self):
+        # The power-of-two-degree requirement is negacyclic-ring-wide (the
+        # 2d-th-root structure, galois_map's index algebra), so the shared
+        # base validates it — previously a composite d slipped past the
+        # residue check and died deep inside table generation.
+        for bad_d in (0, 3, 12):
+            with self.assertRaisesRegex(ValueError, "degree"):
+                BACKENDS["reference"](Q_MODULI, bad_d)

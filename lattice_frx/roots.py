@@ -136,3 +136,33 @@ def slot_exponents(d: int) -> list[int]:
     """
     bits = (d - 1).bit_length()
     return [2 * bit_reverse(j, bits) + 1 for j in range(d)]
+
+
+def split_root(q: int) -> int:
+    """The split constant of a partial-split modulus: the canonical (smaller)
+    square root of `-1` modulo q, so `X^d + 1 ≡ (X^{d/2} - r)(X^{d/2} + r)`.
+
+    The partial-split sibling of `primitive_root`: a per-modulus ring
+    constant computed once, below both the host and (future traced) split
+    rings rather than inside either. Only defined at primes
+    `q ≡ 5 (mod 8)`. The two failure modes carry distinct messages on
+    purpose: a non-prime is a caller bug anywhere, while `q ≡ 1 (mod 8)`
+    usually means an NTT-friendly limb strayed into the partial-split
+    mode — the two ring modes must never be mixed, since the mismatch
+    surfaces downstream as a soundness gap, not an error.
+
+    `r = 2^((q-1)/4) mod q` works because 2 is a quadratic non-residue
+    exactly when q ≡ ±3 (mod 8), so its `(q-1)/4` power squares to the
+    Legendre symbol `-1`. Of the pair `{r, q-r}` the smaller is returned,
+    as a deterministic pin.
+    """
+    if not _is_prime(q):
+        raise ValueError(f"split_root: modulus must be prime, got {q!r}")
+    if q % 8 != 5:
+        raise ValueError(
+            f"split_root: q must be ≡ 5 (mod 8), got {q} ≡ {q % 8} (mod 8) — "
+            "an NTT-friendly limb (≡ 1 mod 2d, hence ≡ 1 mod 8) belongs to the "
+            "NTT ring mode, not the partial-split one"
+        )
+    r = pow(2, (q - 1) // 4, q)
+    return min(r, q - r)

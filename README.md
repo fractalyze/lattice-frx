@@ -34,6 +34,17 @@ both operands, multiply pointwise, transform back. The negacyclic ring
 needs a `2d`-th root of unity, which exists only when `q ≡ 1 (mod 2d)` —
 that condition is what "NTT-friendly prime" means.
 
+And one ring in a second **mode**: `split_ring.py` carries the same
+quotient at partial-split moduli `q ≡ 5 (mod 8)`, where `X^d + 1` factors
+into exactly two irreducible halves instead of `d` linear ones. That
+kills the NTT but buys what LNP-style proofs (eprint 2022/284) stand on:
+small σ₋₁-invariant challenge differences stay invertible, which full
+splitting can never give. The two prime families are mutually exclusive
+(`q ≡ 1 (mod 2d)` forces `q ≡ 1 (mod 8)`), so the mode is chosen by the
+modulus and every constructor rejects the other family's primes loudly.
+Host oracle only for now; the traced split-domain ring is a tracked
+follow-up.
+
 The subtlety worth knowing before you use this: **the order an NTT emits
 its outputs in is implementation-defined** (bit-reversed vs natural). Two
 libraries computing "the same" NTT agree on the values and can disagree on
@@ -119,10 +130,13 @@ choice between the two reconstructions — which disagree at exactly
 
 ### `primes.py`, `canonical.py`
 
-NTT-friendly prime search, and the array contract every module above
-enforces — `dtype=np.uint64`, every residue below its own limb's modulus,
-defined once with a `bool` form for callers deciding something and a
-raising form for callers about to assume it.
+Prime search for both modulus families — NTT-friendly (`≡ 1 mod 2d`) and
+partial-split (`≡ 5 mod 8`), one shared walk — and the array contract
+every module above enforces: `dtype=np.uint64`, every residue below its
+own limb's modulus, defined once with a `bool` form for callers deciding
+something and a raising form for callers about to assume it. Per-modulus
+ring constants (`primitive_root`, `split_root`) live in `roots.py`, below
+both rings.
 
 ## Where this sits
 

@@ -86,3 +86,24 @@ py_test(
         "@lattice_frx_pip//scipy",
     ],
 )
+
+py_test(
+    name = "primes_test",
+    size = "small",
+    srcs = ["primes_test.py"],
+    deps = [
+        "//lattice_frx",
+        requirement("absl-py"),
+    ],
+)
+
+py_test(
+    name = "split_ring_test",
+    size = "small",
+    srcs = ["split_ring_test.py"],
+    deps = [
+        "//lattice_frx",
+        requirement("absl-py"),
+        "@lattice_frx_pip//numpy",
+    ],
+)
