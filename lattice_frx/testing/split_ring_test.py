@@ -17,6 +17,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 
 from lattice_frx import primes
+from lattice_frx import roots
 from lattice_frx.split_ring import HostSplitRing
 
 _D = 16
@@ -55,19 +56,8 @@ def _half_inverse(u: list[int], s: int, q: int):
                 return i
         return -1
 
-    def polymod(a, b):
-        a = a[:]
-        db = deg(b)
-        inv_lead = pow(b[db], -1, q)
-        for i in range(deg(a), db - 1, -1):
-            f = a[i] * inv_lead % q
-            if f:
-                for j in range(db + 1):
-                    a[i - db + j] = (a[i - db + j] - f * b[j]) % q
-        return a[:db] if db > 0 else [0]
-
     # Euclid with Bezout tracking on the first argument.
-    r0, r1 = modulus, [x % q for x in u] + [0]
+    r0, r1 = modulus, [x % q for x in u]
     t0, t1 = [0], [1]
     while deg(r1) > 0:
         d0, d1 = deg(r0), deg(r1)
@@ -84,6 +74,29 @@ def _half_inverse(u: list[int], s: int, q: int):
     c_inv = pow(r1[0], -1, q)
     out = [(x * c_inv) % q for x in t1]
     return (out + [0] * n)[:n]
+
+
+class SplitRootTest(absltest.TestCase):
+
+    def test_split_root_squares_to_minus_one(self):
+        for q in _Q_MODULI:
+            r = roots.split_root(q)
+            self.assertEqual(r * r % q, q - 1)
+            # Deterministic canonical pick: the smaller of the two roots.
+            self.assertEqual(r, min(r, q - r))
+
+    def test_split_root_rejects_an_ntt_friendly_modulus(self):
+        # An NTT-friendly limb is ≡ 1 (mod 2d) hence ≡ 1 (mod 8) — the other
+        # ring mode. The error must name the mode confusion, since silently
+        # mixing the two is a soundness bug in the consumer, not a crash.
+        [q] = primes.find_nearest_ntt_primes(_D, 30.0, 1)
+        with self.assertRaisesRegex(ValueError, "NTT"):
+            roots.split_root(q)
+
+    def test_split_root_rejects_a_non_prime(self):
+        for bad in (0, 1, 21, 4):  # 21 ≡ 5 (mod 8), still rejected
+            with self.assertRaisesRegex(ValueError, "prime"):
+                roots.split_root(bad)
 
 
 class SplitRingConstructionTest(parameterized.TestCase):

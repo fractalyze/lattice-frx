@@ -13,10 +13,10 @@ Two layers share this module:
   at the same (rank, bits) — a consumer must pick the one its reference
   uses rather than assuming they agree.
 
-- `find_nearest_split_primes` / `split_root` — the partial-split family
-  (`q ≡ 5 (mod 8)`), the modulus shape `split_ring.py` hosts and the NTT
-  walk can never produce; see those functions for why the two families
-  are mutually exclusive.
+- `find_nearest_split_primes` — the partial-split family (`q ≡ 5 (mod
+  8)`), the modulus shape `split_ring.py` hosts and the NTT walk can
+  never produce. The family's ring constant (`split_root`) lives in
+  `roots.py`, below both rings, like `primitive_root` does.
 
 `MAX_MODULUS` (2**50) is part of the ported contract — the crt stack caps
 every modulus at `num.MaxModulus` (math/num/mod.go), and the walk's
@@ -85,19 +85,15 @@ def prev_prime(x: int, skip: int) -> int:
         t -= skip
 
 
-def find_nearest_ntt_primes(rank: int, bits: float, cnt: int) -> list[int]:
-    """Port of `crt.FindNearestNTTPrimes` (math/crt/primes.go).
-
-    NTT-friendly means `≡ 1 (mod 2*rank)`. The start point anchors at the
-    largest multiple of `2*rank` below `2**bits`, plus one; `cnt` splits as
-    `next = cnt >> 1` above and `prev = cnt - next` below, each side falling
-    back to the other when it runs out of primes under the `MAX_MODULUS`
-    cap. Result is sorted ascending (`num.CmpModulus`).
-    """
-    gap = rank << 1
-    # Go: (uint64(math.Floor(math.Exp2(bits)) / float64(gap))) * gap + 1 —
-    # float division then truncation; exact here because bits <= 50 < 53.
-    start = int(math.floor(math.exp2(bits)) / gap) * gap + 1
+def _find_nearest_primes(start: int, gap: int, cnt: int, name: str) -> list[int]:
+    """The anchored up/down prime walk both families share: `cnt` primes
+    nearest `start`, stepping by `gap` (which preserves the residue class
+    the anchor pinned), each side falling back to the other when it runs
+    out under the `MAX_MODULUS` cap, sorted ascending. One body so a fix
+    to the fallback logic — the subtle part — cannot land in one family
+    and not the other; the ported behavior of `find_nearest_ntt_primes`
+    (crt.FindNearestNTTPrimes) is preserved exactly, the anchors are what
+    differ per family."""
     next_cnt = cnt >> 1
     prev_cnt = cnt - next_cnt
 
@@ -120,19 +116,35 @@ def find_nearest_ntt_primes(rank: int, bits: float, cnt: int) -> list[int]:
         prev_primes.append(t)
 
     if len(next_primes) < next_cnt and len(prev_primes) < prev_cnt:
-        raise ValueError("find_nearest_ntt_primes: not enough primes found")
+        raise ValueError(f"{name}: not enough primes found")
     elif len(next_primes) < next_cnt:
-        t = prev_primes[prev_cnt - 1]
+        t = prev_primes[-1]
         for _ in range(cnt - (len(next_primes) + len(prev_primes))):
             t = prev_prime(t, gap)
             prev_primes.append(t)
     elif len(prev_primes) < prev_cnt:
-        t = next_primes[next_cnt - 1]
+        t = next_primes[-1]
         for _ in range(cnt - (len(next_primes) + len(prev_primes))):
             t = next_prime(t, gap)
             next_primes.append(t)
 
     return sorted(prev_primes + next_primes)
+
+
+def find_nearest_ntt_primes(rank: int, bits: float, cnt: int) -> list[int]:
+    """Port of `crt.FindNearestNTTPrimes` (math/crt/primes.go).
+
+    NTT-friendly means `≡ 1 (mod 2*rank)`. The start point anchors at the
+    largest multiple of `2*rank` below `2**bits`, plus one; `cnt` splits as
+    `next = cnt >> 1` above and `prev = cnt - next` below, each side falling
+    back to the other when it runs out of primes under the `MAX_MODULUS`
+    cap. Result is sorted ascending (`num.CmpModulus`).
+    """
+    gap = rank << 1
+    # Go: (uint64(math.Floor(math.Exp2(bits)) / float64(gap))) * gap + 1 —
+    # float division then truncation; exact here because bits <= 50 < 53.
+    start = int(math.floor(math.exp2(bits)) / gap) * gap + 1
+    return _find_nearest_primes(start, gap, cnt, "find_nearest_ntt_primes")
 
 
 def find_nearest_split_primes(bits: float, cnt: int) -> list[int]:
@@ -148,67 +160,6 @@ def find_nearest_split_primes(bits: float, cnt: int) -> list[int]:
     up/down walk and `MAX_MODULUS` cap as the NTT walk, with the step
     keeping the residue class: multiples of 8 preserve `q mod 8`.
     """
-    gap = 8
-    start = int(math.floor(math.exp2(bits))) // gap * gap + 5
-    next_cnt = cnt >> 1
-    prev_cnt = cnt - next_cnt
-
-    next_primes: list[int] = []
-    t = start
-    for _ in range(next_cnt):
-        try:
-            t = next_prime(t, gap)
-        except OverflowError:
-            break
-        next_primes.append(t)
-
-    prev_primes: list[int] = []
-    t = start
-    for _ in range(prev_cnt):
-        try:
-            t = prev_prime(t, gap)
-        except OverflowError:
-            break
-        prev_primes.append(t)
-
-    if len(next_primes) < next_cnt and len(prev_primes) < prev_cnt:
-        raise ValueError("find_nearest_split_primes: not enough primes found")
-    elif len(next_primes) < next_cnt:
-        t = prev_primes[-1]
-        for _ in range(cnt - (len(next_primes) + len(prev_primes))):
-            t = prev_prime(t, gap)
-            prev_primes.append(t)
-    elif len(prev_primes) < prev_cnt:
-        t = next_primes[-1]
-        for _ in range(cnt - (len(next_primes) + len(prev_primes))):
-            t = next_prime(t, gap)
-            next_primes.append(t)
-
-    return sorted(prev_primes + next_primes)
-
-
-def split_root(q: int) -> int:
-    """The split constant of a partial-split modulus: the canonical (smaller)
-    square root of `-1` modulo q, so `X^d + 1 ≡ (X^{d/2} - r)(X^{d/2} + r)`.
-
-    Only defined at primes `q ≡ 5 (mod 8)`. The two failure modes carry
-    distinct messages on purpose: a non-prime is a caller bug anywhere,
-    while `q ≡ 1 (mod 8)` usually means an NTT-friendly limb strayed into
-    the partial-split mode — the two ring modes must never be mixed, since
-    the mismatch surfaces downstream as a soundness gap, not an error.
-
-    `r = 2^((q-1)/4) mod q` works because 2 is a quadratic non-residue
-    exactly when q ≡ ±3 (mod 8), so its `(q-1)/4` power squares to the
-    Legendre symbol `-1`. Of the pair `{r, q-r}` the smaller is returned,
-    as a deterministic pin.
-    """
-    if not is_prime(q):
-        raise ValueError(f"split_root: modulus must be prime, got {q!r}")
-    if q % 8 != 5:
-        raise ValueError(
-            f"split_root: q must be ≡ 5 (mod 8), got {q} ≡ {q % 8} (mod 8) — "
-            "an NTT-friendly limb (≡ 1 mod 2d, hence ≡ 1 mod 8) belongs to the "
-            "NTT ring mode, not the partial-split one"
-        )
-    r = pow(2, (q - 1) // 4, q)
-    return min(r, q - r)
+    return _find_nearest_primes(
+        int(math.floor(math.exp2(bits))) // 8 * 8 + 5, 8, cnt, "find_nearest_split_primes"
+    )

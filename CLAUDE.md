@@ -83,6 +83,12 @@ each module is here, and where the repo sits relative to the other
   order is silently wrong for anything mixing this output with another
   implementation's bytes, and no property test catches it — a permutation
   belongs in an accelerated backend's boundary adapter, not here.
+- **Two ring modes, mutually exclusive moduli.** The NTT rings
+  (`ring.py`/`host_ring.py`) need limbs `≡ 1 (mod 2d)`; the partial-split
+  ring (`split_ring.py`, the LNP line's mode) needs limbs `≡ 5 (mod 8)`,
+  and no prime is both. Never feed one family's primes to the other's
+  ring — constructors guard it, and the guard's error names the other
+  mode because a silent mix would surface as a consumer's soundness gap.
 - **Two reference implementations disagree on purpose.** `rns.py` ports
   both, and the differences are real: reconstruction tie-breaking at
   exactly `Q/2`, and `pow2_cut` rounding where `rescale_floor` floors

@@ -216,9 +216,14 @@ class _HostRingBase:
     (partial-split limbs). `_op_prefix` names the subclass in contract
     errors, which tests pin."""
 
-    _op_prefix = "HostRing"
+    backend = "reference"
+    _op_prefix: str  # set by each subclass; names it in contract errors
 
     def __init__(self, q_moduli, d: int):
+        if d < 2 or d & (d - 1):
+            raise ValueError(
+                f"{type(self).__name__}: degree must be a power of two >= 2, got {d!r}"
+            )
         self.q_moduli: tuple[int, ...] = tuple(int(q) for q in q_moduli)
         self.d = d
         self._q_col = np.array(self.q_moduli, dtype=object)[:, None]
@@ -254,6 +259,23 @@ class _HostRingBase:
     def neg(self, a: np.ndarray) -> np.ndarray:
         a = self._coerce(a, "neg")
         return self._reduce(-a)
+
+    def mul_scalar(self, a: np.ndarray, s: int) -> np.ndarray:
+        """`a*s` (lattigo `MulRNSScalarMontgomery`, Montgomery fold
+        dropped): `s` is a single scalar shared across every limb, reduced
+        mod each limb's own modulus by the `%` below -- the same
+        shared-scalar convention as `mul_scalar_then_sub` below, just
+        without the accumulate-and-subtract."""
+        a = self._coerce(a, "mul_scalar")
+        return self._reduce(a * s)
+
+    def mul_scalar_then_sub(self, a: np.ndarray, s: int, acc: np.ndarray) -> np.ndarray:
+        """`acc - a*s` (lattigo `MulScalarThenSub`, operations.go):
+        `s` is a single scalar shared across every limb, reduced mod each
+        limb's own modulus by the `%` below."""
+        a = self._coerce(a, "mul_scalar_then_sub")
+        acc = self._coerce(acc, "mul_scalar_then_sub")
+        return self._reduce(acc - a * s)
 
     def galois(self, a: np.ndarray, k: int) -> np.ndarray:
         """`roots.galois_map`'s action, one coefficient at a time.
@@ -338,7 +360,6 @@ class HostRnsRing(_HostRingBase):
     once it's converted to the internal object-dtype representation.
     """
 
-    backend = "reference"
     _op_prefix = "RnsRing"
 
     def __init__(self, q_moduli, d: int):
@@ -377,19 +398,3 @@ class HostRnsRing(_HostRingBase):
         acc = self._coerce(acc, "mul_add")
         return self._reduce(acc + a * b)
 
-    def mul_scalar(self, a: np.ndarray, s: int) -> np.ndarray:
-        """`a*s` (lattigo `MulRNSScalarMontgomery`, Montgomery fold
-        dropped): `s` is a single scalar shared across every limb, reduced
-        mod each limb's own modulus by the `%` below -- the same
-        shared-scalar convention as `mul_scalar_then_sub` below, just
-        without the accumulate-and-subtract."""
-        a = self._coerce(a, "mul_scalar")
-        return self._reduce(a * s)
-
-    def mul_scalar_then_sub(self, a: np.ndarray, s: int, acc: np.ndarray) -> np.ndarray:
-        """`acc - a*s` (lattigo `MulScalarThenSub`, operations.go):
-        `s` is a single scalar shared across every limb, reduced mod each
-        limb's own modulus by the `%` below."""
-        a = self._coerce(a, "mul_scalar_then_sub")
-        acc = self._coerce(acc, "mul_scalar_then_sub")
-        return self._reduce(acc - a * s)

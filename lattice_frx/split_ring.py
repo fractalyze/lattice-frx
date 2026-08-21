@@ -13,7 +13,7 @@ which kills the NTT but buys the property LNP-style proofs (eprint
 below `q/2` is invertible (Lemma 2.6), so soundness extraction can divide
 by challenge differences. One ring cannot have both — `q ≡ 1 (mod 2d)`
 forces `q ≡ 1 (mod 8)` for `d ≥ 4` — so this is a mode, not a parameter,
-and `primes.split_root` rejects a stray NTT-friendly limb loudly.
+and `roots.split_root` rejects a stray NTT-friendly limb loudly.
 
 Representation and contract are `host_ring.py`'s, shared through
 `_HostRingBase`: `(limbs, d)` `dtype=np.uint64` canonical arrays outside,
@@ -43,25 +43,22 @@ import numpy as np
 
 from lattice_frx.canonical import require_canonical
 from lattice_frx.host_ring import _HostRingBase
-from lattice_frx.primes import split_root
+from lattice_frx.roots import split_root
 
 
 class HostSplitRing(_HostRingBase):
     """The partial-split ring over `prod(q_moduli)`, every limb ≡ 5 (mod 8).
 
-    `split_roots[l]` is `primes.split_root(q_l)` — the canonical square
+    `split_roots[l]` is `roots.split_root(q_l)` — the canonical square
     root of `-1` naming limb `l`'s two CRT halves.
     """
 
-    backend = "reference"
     _op_prefix = "SplitRing"
 
     def __init__(self, q_moduli, d: int):
-        if d < 4 or d & (d - 1):
-            raise ValueError(
-                f"HostSplitRing: degree must be a power of two >= 4, got {d!r}"
-            )
-        super().__init__(q_moduli, d)
+        if d < 4:
+            raise ValueError(f"HostSplitRing: degree must be >= 4 to split, got {d!r}")
+        super().__init__(q_moduli, d)  # power-of-two degree checked there
         self.split_roots: tuple[int, ...] = tuple(split_root(q) for q in self.q_moduli)
 
     def mul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -73,12 +70,11 @@ class HostSplitRing(_HostRingBase):
         b = self._coerce(b, "mul")
         rows = []
         for l, q in enumerate(self.q_moduli):
-            ra = [int(x) for x in a[l]]
-            rb = [int(x) for x in b[l]]
+            row_b = b[l]
             conv = [0] * (2 * self.d)
-            for i, ai in enumerate(ra):
+            for i, ai in enumerate(a[l]):
                 if ai:
-                    for j, bj in enumerate(rb):
+                    for j, bj in enumerate(row_b):
                         conv[i + j] += ai * bj
             rows.append([(conv[k] - conv[k + self.d]) % q for k in range(self.d)])
         return np.array(rows, dtype=np.uint64)
@@ -92,8 +88,7 @@ class HostSplitRing(_HostRingBase):
         out = np.empty((len(self.q_moduli), 2, half), dtype=np.uint64)
         for l, q in enumerate(self.q_moduli):
             r = self.split_roots[l]
-            low = [int(x) for x in a[l][:half]]
-            high = [int(x) for x in a[l][half:]]
+            low, high = a[l][:half], a[l][half:]
             out[l, 0] = [(lo + r * hi) % q for lo, hi in zip(low, high)]
             out[l, 1] = [(lo - r * hi) % q for lo, hi in zip(low, high)]
         return out
@@ -108,15 +103,13 @@ class HostSplitRing(_HostRingBase):
                 f"SplitRing.from_split: expected shape {(limbs, 2, half)}, "
                 f"got {getattr(sp, 'shape', None)!r}"
             )
-        require_canonical(
-            np.ascontiguousarray(sp).reshape(limbs, self.d),
-            self.q_moduli,
-            "SplitRing.from_split",
-        )
+        require_canonical(sp.reshape(limbs, self.d), self.q_moduli, "SplitRing.from_split")
         out_rows = []
         for l, q in enumerate(self.q_moduli):
             inv2 = pow(2, -1, q)
             inv2r = pow(2 * self.split_roots[l], -1, q)
+            # int() is load-bearing here: `sp` never passes _coerce, so its
+            # elements are np.uint64 scalars whose products would wrap.
             u = [int(x) for x in sp[l, 0]]
             v = [int(x) for x in sp[l, 1]]
             low = [(ui + vi) * inv2 % q for ui, vi in zip(u, v)]
