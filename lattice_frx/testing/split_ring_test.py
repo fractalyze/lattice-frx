@@ -18,6 +18,7 @@ import numpy as np
 from absl.testing import absltest
 from absl.testing import parameterized
 
+from lattice_frx import canonical
 from lattice_frx import primes
 from lattice_frx import roots
 from lattice_frx.split_ring import HostSplitRing
@@ -339,6 +340,108 @@ class SplitRingModuleTest(absltest.TestCase):
         stack = _random_stack(rng, ring, 2)
         with self.assertRaisesRegex(ValueError, r"^SplitRing\.add"):
             ring.add(np.swapaxes(stack, -1, -2), np.swapaxes(stack, -1, -2))
+
+
+class SplitRingModuleConstantsTest(absltest.TestCase):
+    """The rest of the module surface: the ring's own constants, its
+    `Z_q`-weighted sum, the constant coefficient, and a uniform stack —
+    the ops a proof layer would otherwise spell against the array layout.
+    """
+
+    def test_combine_matches_the_per_term_fold(self):
+        """Whatever the stack carries past its leading axis rides along, so
+        one call aggregates elements and whole matrix rows alike."""
+        ring = _ring()
+        rng = np.random.default_rng(20)
+        weights = rng.integers(0, ring.q_moduli[0], size=4)
+        for lead in ((), (3,), (2, 3)):
+            values = _random_stack(rng, ring, 4, *lead)
+            want = ring.mul_scalar(values[0], int(weights[0]))
+            for value, weight in zip(values[1:], weights[1:]):
+                want = ring.add(want, ring.mul_scalar(value, int(weight)))
+            np.testing.assert_array_equal(ring.combine(weights, values), want)
+
+    def test_combine_over_no_terms_is_the_zero_it_sums_to(self):
+        ring = _ring()
+        got = ring.combine([], ring.zeros(0, 3))
+        np.testing.assert_array_equal(got, ring.zeros(3))
+
+    def test_combine_rejects_a_weight_count_mismatch_and_a_bare_element(self):
+        ring = _ring()
+        rng = np.random.default_rng(21)
+        values = _random_stack(rng, ring, 4)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.combine"):
+            ring.combine([1, 2, 3], values)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.combine"):
+            ring.combine([1] * len(ring.q_moduli), values[0])
+
+    def test_zeros_is_the_additive_and_one_the_multiplicative_identity(self):
+        ring = _ring()
+        rng = np.random.default_rng(22)
+        a = _random_canonical(rng, ring)
+        np.testing.assert_array_equal(ring.add(a, ring.zeros()), a)
+        np.testing.assert_array_equal(ring.mul(a, ring.one()), a)
+        self.assertEqual(ring.zeros(2, 3).shape, (2, 3, len(ring.q_moduli), ring.d))
+
+    def test_constant_coeff_is_the_coefficient_a_signed_embedding_put_there(self):
+        ring = _ring()
+        rows = [[7] + [0] * (ring.d - 1), [-3] + list(range(1, ring.d))]
+        got = ring.constant_coeff(ring.from_signed_stack(rows))
+        np.testing.assert_array_equal(
+            got,
+            np.array(
+                [[7 % q for q in ring.q_moduli], [-3 % q for q in ring.q_moduli]],
+                dtype=np.uint64,
+            ),
+        )
+
+    def test_constant_coeff_does_not_alias_its_input(self):
+        ring = _ring()
+        stack = ring.from_signed_stack([[5] + [0] * (ring.d - 1)])
+        got = ring.constant_coeff(stack)
+        got[...] = 0
+        self.assertEqual(int(stack[0, 0, 0]), 5)
+
+    def test_uniform_stack_is_canonical_reproducible_and_varied(self):
+        ring = _ring()
+        limbs = len(ring.q_moduli)
+        stack = ring.uniform_stack(np.random.default_rng(24), 3, 2)
+        self.assertEqual(stack.shape, (3, 2, limbs, ring.d))
+        self.assertTrue(canonical.is_canonical(stack, ring.q_moduli))
+        np.testing.assert_array_equal(
+            stack, ring.uniform_stack(np.random.default_rng(24), 3, 2)
+        )
+        self.assertFalse(
+            np.array_equal(stack, ring.uniform_stack(np.random.default_rng(25), 3, 2))
+        )
+        bare = ring.uniform_stack(np.random.default_rng(26))
+        self.assertEqual(bare.shape, (limbs, ring.d))
+
+    def test_matvec_and_scale_return_the_empty_stack_rather_than_raising(self):
+        """No rows is a real statement for a proof layer — an opening with
+        no linear relations attached — and the empty answer is the shape
+        convention's own, not something each consumer should special-case.
+        """
+        ring = _ring()
+        rng = np.random.default_rng(27)
+        limbs = len(ring.q_moduli)
+        got = ring.matvec(ring.zeros(0, 3), _random_stack(rng, ring, 3))
+        self.assertEqual((got.shape, got.dtype), ((0, limbs, ring.d), np.uint64))
+        got = ring.scale(_random_canonical(rng, ring), ring.zeros(0))
+        self.assertEqual((got.shape, got.dtype), ((0, limbs, ring.d), np.uint64))
+
+    def test_the_empty_case_still_enforces_the_operand_contract(self):
+        """How many rows the answer has must not decide whether the
+        operands are checked, or the no-rows path is a hole in the
+        boundary — with nothing to multiply, `mul` never runs, and `mul` is
+        where these would otherwise meet the contract."""
+        ring = _ring()
+        rng = np.random.default_rng(28)
+        signed = _random_stack(rng, ring, 3).astype(np.int64)
+        with self.assertRaisesRegex(TypeError, r"^SplitRing\.matvec"):
+            ring.matvec(ring.zeros(0, 3), signed)
+        with self.assertRaisesRegex(TypeError, r"^SplitRing\.scale"):
+            ring.scale(signed[0], ring.zeros(0))
 
 
 if __name__ == "__main__":
