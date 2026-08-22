@@ -52,10 +52,37 @@ A·s:      matvec — per limb, [.., m, k, d] × [.., k, d] → [.., m, d]  (Eva
 ```
 
 Every other op is pointwise per limb or transforms `axis=-1`, so batching is
-what the ops already do. `stack` is the convention's constructor — consumers
-assemble batches through it rather than re-deriving the limb transpose by
-hand — and `matvec` is the one op that reads the leading axes rather than
-mapping over them.
+what the ops already do. Two ops read the leading axes rather than mapping
+over them, and both *contract* one: `matvec` against ring elements, and
+`combine` against plain `Z_q` scalars (`Σ_u w_u · stack[u]` — a Fiat-Shamir
+aggregation's weights are the caller that wants it). Whatever a stack carries
+past the contracted axis rides along, so `combine` serves a stack of elements
+and a stack of whole matrix rows with one call.
+
+The rest of the convention is its constructors and constants, and they are
+here for the same reason `matvec` is — so that a consumer reaches for the
+ring instead of re-deriving the layout:
+
+```
+stack / from_signed_stack / uniform_stack  — assemble a batch
+zeros(*lead) / one()                       — the identities, at any batch shape
+constant_coeff                             — coefficient 0 per limb
+```
+
+`constant_coeff` earns its name rather than staying `arr[..., 0]` because that
+index *is* the host backend's array layout: a representation that holds no
+coefficients — the split-domain ring holds CRT residues — leaves a consumer
+that reached into it to be rewritten rather than re-pointed. `one()` is the
+coefficient-domain identity on every backend, so on the NTT ring it is
+`ntt(one())` that `mul` accepts; naming it per backend would make `one` two
+different ring elements.
+
+`matvec` over no rows and `scale` over an empty stack return the empty stack
+rather than raising. Contracting nothing is a real statement — a proof of an
+opening with no linear relations attached — and the empty answer belongs to
+the convention, not to each consumer's wrapper. The operands still meet the
+contract there: how many rows the answer has must not decide whether they are
+checked.
 
 ## Rejected: a ring element as a zk_dtypes scalar
 

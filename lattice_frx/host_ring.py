@@ -40,8 +40,11 @@ limb) standard-form residues, defined and enforced in
 `lattice_frx/canonical.py`. Internally, each op converts to an
 object-dtype array of exact Python ints (the lattigo-order NTT and every
 other computation below is unchanged — d=256 makes the round-trip
-conversion free) and converts back on the way out; `_coerce` is the
-single entry point for that conversion plus the contract check.
+conversion free) and converts back on the way out. `_require` is the
+single entry point for the contract check, and `_coerce` — that check
+plus the conversion — for every op that goes on to compute with the
+array; an op that only reads one, or that answers an empty stack without
+multiplying anything, calls `_require` directly.
 
 That contract is a *host* contract, and it is worth being explicit that
 it is not a device-shaped one, because it looks like it should be. frx
@@ -242,16 +245,20 @@ class _HostRingBase:
         self.d = d
         self._q_col = np.array(self.q_moduli, dtype=object)[:, None]
 
-    def _coerce(self, a: np.ndarray, op: str, batched: bool = False) -> np.ndarray:
+    def _require(self, a: np.ndarray, op: str, batched: bool = False) -> None:
         """Boundary for the public uint64 contract (module docstring):
         shape first — trailing axes must be `(limbs, d)`, and only the
         batched (elementwise) ops accept leading axes on top — then
-        `canonical.require_canonical` for dtype and residue range, then
-        conversion to an object-dtype array of exact Python ints for the
-        internal math. The shape gate lives here because `canonical.py`
-        deliberately leaves shape to the caller, and without it a
-        `(k, limbs, d)` stack fed to a per-element op would silently read
-        the batch axis as limbs.
+        `canonical.require_canonical` for dtype and residue range. The
+        shape gate lives here because `canonical.py` deliberately leaves
+        shape to the caller, and without it a `(k, limbs, d)` stack fed to
+        a per-element op would silently read the batch axis as limbs.
+
+        Split from `_coerce` because the ops that only *read* an array
+        (`constant_coeff`) or that answer without touching it (`matvec`
+        and `scale` over an empty stack) still owe the caller this check,
+        and would otherwise pay for an object-array conversion they throw
+        away.
         """
         context = f"{self._op_prefix}.{op}"
         want = (len(self.q_moduli), self.d)
@@ -262,6 +269,11 @@ class _HostRingBase:
                 f"(limbs, d) = {want} arrays, got shape {shape!r}"
             )
         require_canonical(a, self.q_moduli, context)
+
+    def _coerce(self, a: np.ndarray, op: str, batched: bool = False) -> np.ndarray:
+        """`_require`, then the object-dtype array of exact Python ints the
+        internal math runs on."""
+        self._require(a, op, batched)
         return a.astype(object)
 
     def _reduce(self, arr: np.ndarray) -> np.ndarray:
@@ -326,6 +338,16 @@ class _HostRingBase:
                 f"(cols, limbs, d) with cols >= 1 and (limbs, d) = {limbs_d}, "
                 f"got {mshape!r} × {vshape!r}"
             )
+        if mshape[0] == 0:
+            # No rows is a real statement — a proof of an opening with no
+            # linear relations attached — and the empty stack is this
+            # convention's own answer, so consumers do not each wrap the
+            # call. The vector still meets the contract here because the
+            # loop below never reaches `mul`, which is where it otherwise
+            # would; how many rows the answer has must not decide whether
+            # the operands are checked.
+            self._require(vector, "matvec", batched=True)
+            return self.zeros(0)
         return np.stack(
             [
                 functools.reduce(
@@ -335,6 +357,103 @@ class _HostRingBase:
                 for row in matrix
             ]
         )
+
+    def combine(self, weights, stack: np.ndarray) -> np.ndarray:
+        """`Σ_u weights[u] · stack[u]`, contracting the stack's leading axis.
+
+        `matvec`'s scalar sibling: that one contracts against ring
+        elements, this one against plain `Z_q` scalars — a Fiat-Shamir
+        aggregation weighting a batch of statements is the caller that
+        wants it. Whatever the stack carries past the contracted axis
+        rides along, so one call serves a stack of elements and a stack of
+        whole matrix rows alike.
+
+        Accumulated in exact Python ints and reduced **once** at the end,
+        rather than folded as `add(acc, mul_scalar(...))` per term, which
+        reduces every term: measured 3.1-4.5x faster over M = 8..32 terms
+        at d = 64, and the caller that would otherwise write the fold is a
+        verifier's inner loop.
+        """
+        weights = [int(w) for w in weights]
+        shape = getattr(stack, "shape", None)
+        if shape is None or len(shape) < 3:
+            raise ValueError(
+                f"{self._op_prefix}.combine: expected a stack with a leading "
+                f"axis to contract — rank >= 3 over (limbs, d) = "
+                f"{(len(self.q_moduli), self.d)} — got shape {shape!r}"
+            )
+        terms = self._coerce(stack, "combine", batched=True)
+        if len(weights) != shape[0]:
+            raise ValueError(
+                f"{self._op_prefix}.combine: got {len(weights)} weights for a "
+                f"stack of {shape[0]} rows"
+            )
+        if not weights:
+            return self.zeros(*shape[1:-2])
+        total = terms[0] * weights[0]
+        for term, weight in zip(terms[1:], weights[1:]):
+            total = total + term * weight
+        return self._reduce(total)
+
+    def zeros(self, *lead: int) -> np.ndarray:
+        """The additive identity as a `lead + (limbs, d)` stack.
+
+        `zeros()` is the element; `zeros(0)` is the empty stack `matvec`
+        and `scale` hand back when they contract nothing.
+        """
+        return np.zeros((*lead, len(self.q_moduli), self.d), dtype=np.uint64)
+
+    def one(self) -> np.ndarray:
+        """The multiplicative identity, **in the coefficient domain**.
+
+        Coefficient-domain like the `from_signed` it is built from, and
+        named for the ring element rather than for whichever array each
+        subclass's `mul` wants: for `HostSplitRing`, whose `mul` is the
+        coefficient-domain convolution, this is that `mul`'s identity
+        directly; for `HostRnsRing`, whose `mul` is the pointwise
+        NTT-domain product, `ntt(one())` is — the all-ones array. Returning
+        one or the other per subclass would make `one` two different ring
+        elements under one name.
+        """
+        return self.from_signed([1] + [0] * (self.d - 1))
+
+    def uniform_stack(self, rng: np.random.Generator, *lead: int) -> np.ndarray:
+        """A `lead + (limbs, d)` stack of independent uniform elements.
+
+        Uniform per limb is uniform over `R_q`, by CRT. The generator is
+        injected like every other randomness consumer in this package —
+        this is the module convention's uniform constructor, the sibling
+        of `from_signed_stack`, not a sampler with a policy of its own.
+        """
+        return np.stack(
+            [
+                rng.integers(0, q, size=(*lead, self.d), dtype=np.uint64)
+                for q in self.q_moduli
+            ],
+            axis=-2,
+        )
+
+    def constant_coeff(self, stack: np.ndarray) -> np.ndarray:
+        """Every element's constant coefficient, as a `lead + (limbs,)` array.
+
+        A coefficient-domain reading by definition, like
+        `to_balanced_limb0`: `HostRnsRing`'s NTT-domain values have no
+        constant coefficient, and taking one of them would be a bug in a
+        plausible shape.
+
+        Named rather than left to the caller as `stack[..., 0]` because
+        that index is *this backend's array layout*, not the ring's
+        interface — a consumer that reaches into it has to be rewritten,
+        not re-pointed, the day it moves to a representation that holds no
+        coefficient at all (a split-domain ring holds CRT residues). The
+        constant coefficient is what carries the `Z_q` statements a proof
+        layer makes over `R_q`, so it is asked for often enough to name.
+        """
+        self._require(stack, "constant_coeff", batched=True)
+        # A copy, not the view: every other op here returns a fresh array,
+        # and a view would let a caller mutating the result corrupt the
+        # input it read from.
+        return stack[..., 0].copy()
 
     def scale(self, element: np.ndarray, stack: np.ndarray) -> np.ndarray:
         """The module scalar action `element · stack[i]` per row — `matvec`'s
@@ -347,6 +466,10 @@ class _HostRingBase:
                 f"{self._op_prefix}.scale: expected a (k, limbs, d) stack with "
                 f"(limbs, d) = {limbs_d}, got {shape!r}"
             )
+        if shape[0] == 0:
+            # `matvec`'s empty case, same reason and same contract note.
+            self._require(element, "scale")
+            return self.zeros(0)
         return np.stack([self.mul(element, row) for row in stack])
 
     def from_signed_stack(self, rows) -> np.ndarray:
