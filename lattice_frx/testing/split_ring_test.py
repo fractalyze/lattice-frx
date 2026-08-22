@@ -12,6 +12,8 @@ The invertibility tests are the property the LNP consumer buys (eprint
 a partial-split modulus. Invertibility is cross-checked against a test-side
 extended-Euclid over each half field.
 """
+import math
+
 import numpy as np
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -238,6 +240,105 @@ class SplitRingInvertibilityTest(absltest.TestCase):
                         one = _twisted_mul([int(x) for x in sp[l, h]], inv, s, q)
                         self.assertEqual(one, [1] + [0] * (ring.d // 2 - 1))
             self.assertEqual(ring.is_invertible(a), expected)
+
+
+def _random_stack(rng, ring, *lead: int) -> np.ndarray:
+    """A `lead + (limbs, d)` stack of independent canonical elements."""
+    flat = [_random_canonical(rng, ring) for _ in range(math.prod(lead))]
+    return np.stack(flat).reshape(*lead, len(ring.q_moduli), ring.d)
+
+
+class SplitRingModuleTest(absltest.TestCase):
+    """The module layer as a shape convention: `matvec` over stacks, and
+    the leading-batch-axis contract of the elementwise ops."""
+
+    def test_matvec_matches_the_per_entry_composition(self):
+        ring = _ring()
+        rng = np.random.default_rng(10)
+        matrix = _random_stack(rng, ring, 2, 3)
+        vector = _random_stack(rng, ring, 3)
+        got = ring.matvec(matrix, vector)
+        for r in range(2):
+            want = ring.mul(matrix[r, 0], vector[0])
+            for c in range(1, 3):
+                want = ring.add(want, ring.mul(matrix[r, c], vector[c]))
+            np.testing.assert_array_equal(got[r], want)
+
+    def test_matvec_is_linear(self):
+        ring = _ring()
+        rng = np.random.default_rng(11)
+        matrix = _random_stack(rng, ring, 2, 3)
+        x = _random_stack(rng, ring, 3)
+        y = _random_stack(rng, ring, 3)
+        # The right-hand sides also exercise the batched elementwise add.
+        np.testing.assert_array_equal(
+            ring.matvec(matrix, ring.add(x, y)),
+            ring.add(ring.matvec(matrix, x), ring.matvec(matrix, y)),
+        )
+
+    def test_batched_elementwise_ops_apply_per_element(self):
+        ring = _ring()
+        rng = np.random.default_rng(12)
+        a = _random_stack(rng, ring, 4)
+        b = _random_stack(rng, ring, 4)
+        for got, want_fn in [
+            (ring.add(a, b), lambda i: ring.add(a[i], b[i])),
+            (ring.sub(a, b), lambda i: ring.sub(a[i], b[i])),
+            (ring.neg(a), lambda i: ring.neg(a[i])),
+            (ring.mul_scalar(a, 7), lambda i: ring.mul_scalar(a[i], 7)),
+        ]:
+            for i in range(4):
+                np.testing.assert_array_equal(got[i], want_fn(i))
+
+    def test_matvec_shape_mismatches_raise(self):
+        ring = _ring()
+        rng = np.random.default_rng(13)
+        matrix = _random_stack(rng, ring, 2, 3)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matvec"):
+            ring.matvec(matrix, _random_stack(rng, ring, 2))  # cols mismatch
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matvec"):
+            ring.matvec(matrix[0], _random_stack(rng, ring, 3))  # 3-D matrix
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matvec"):
+            ring.matvec(matrix[:, :0], np.empty((0,) + matrix.shape[2:], np.uint64))
+
+    def test_a_per_element_op_rejects_a_stack(self):
+        """`mul`/`galois`/`to_split` read axis 0 as limbs — a stack there
+        must raise, not silently misread the batch axis."""
+        ring = _ring()
+        rng = np.random.default_rng(14)
+        stack = _random_stack(rng, ring, 2)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.mul"):
+            ring.mul(stack, stack)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.galois"):
+            ring.galois(stack, 3)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.to_split"):
+            ring.to_split(stack)
+
+    def test_scale_matches_per_row_mul(self):
+        ring = _ring()
+        rng = np.random.default_rng(16)
+        element = _random_canonical(rng, ring)
+        stack = _random_stack(rng, ring, 3)
+        got = ring.scale(element, stack)
+        for i in range(3):
+            np.testing.assert_array_equal(got[i], ring.mul(element, stack[i]))
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.scale"):
+            ring.scale(element, stack[0])  # a bare element is not a stack
+
+    def test_from_signed_stack_matches_per_row_from_signed(self):
+        ring = _ring()
+        rng = np.random.default_rng(17)
+        rows = rng.integers(-3, 4, size=(3, ring.d))
+        got = ring.from_signed_stack(rows)
+        for i in range(3):
+            np.testing.assert_array_equal(got[i], ring.from_signed(rows[i]))
+
+    def test_a_batched_op_rejects_wrong_trailing_axes(self):
+        ring = _ring()
+        rng = np.random.default_rng(15)
+        stack = _random_stack(rng, ring, 2)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.add"):
+            ring.add(np.swapaxes(stack, -1, -2), np.swapaxes(stack, -1, -2))
 
 
 if __name__ == "__main__":

@@ -216,6 +216,25 @@ class RingTest(parameterized.TestCase):
                 want = ref.mul_add(a_hosts[i][j], s_hosts[j], want)
             self.assertTrue(np.array_equal(dev.to_host(_row(got, i)), want))
 
+    def test_host_matvec_agrees_with_the_traced_one(self) -> None:
+        """The host module matvec (composed `mul`/`add`, NTT-domain for this
+        ring) against `RnsRing.matvec` on the same values — the same
+        cross-implementation gate the elementwise ops get above."""
+        ref, dev = rings()
+        m, k = 2, 3
+        a_hosts = [[_random_host(70 + i * k + j) for j in range(k)] for i in range(m)]
+        s_hosts = [_random_host(80 + j) for j in range(k)]
+        got = ref.matvec(
+            np.stack([np.stack(row) for row in a_hosts]), np.stack(s_hosts)
+        )
+        mat = dev.stack(
+            [dev.stack([dev.eval_from_host(h) for h in row]) for row in a_hosts]
+        )
+        vec = dev.stack([dev.eval_from_host(h) for h in s_hosts])
+        want = dev.matvec(mat, vec)
+        for i in range(m):
+            self.assertTrue(np.array_equal(got[i], dev.to_host(_row(want, i))))
+
     def test_matvec_rejects_a_shape_mismatch(self) -> None:
         _, dev = rings()
         a, b, c = (dev.eval_from_host(_random_host(s)) for s in (40, 41, 42))

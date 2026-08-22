@@ -79,6 +79,8 @@ lattigo's `utils/factorization` package: only the resulting *set* of unique
 prime factors feeds `PrimitiveRoot`'s search, so any correct factorization
 algorithm agrees with lattigo's on that set.
 """
+import functools
+
 import numpy as np
 
 # The array contract and the NTT's constants live in this package's shared
@@ -214,7 +216,19 @@ class _HostRingBase:
     via the NTT (fully-splitting limbs), `HostSplitRing`
     (`lattice_frx/split_ring.py`) via coefficient-domain convolution
     (partial-split limbs). `_op_prefix` names the subclass in contract
-    errors, which tests pin."""
+    errors, which tests pin.
+
+    **Module stacks.** A module vector is a leading-axis stack of elements
+    (`(k, limbs, d)`), a matrix a `(rows, cols, limbs, d)` stack — the
+    module layer is a shape convention, not a type (see
+    `docs/ring-representation.md`). The purely elementwise ops
+    (`add`/`sub`/`neg`/`mul_scalar`/`mul_scalar_then_sub`) accept any
+    leading batch axes and apply per element; `matvec` composes the
+    subclass's `mul`/`add` over such stacks. Everything else
+    (`mul`, `galois`, the transforms, the lifts) takes exactly one
+    `(limbs, d)` element — a batched input there raises rather than
+    silently reading the batch axis as limbs.
+    """
 
     backend = "reference"
     _op_prefix: str  # set by each subclass; names it in contract errors
@@ -228,13 +242,26 @@ class _HostRingBase:
         self.d = d
         self._q_col = np.array(self.q_moduli, dtype=object)[:, None]
 
-    def _coerce(self, a: np.ndarray, op: str) -> np.ndarray:
-        """Boundary for the public `(limbs, d)` uint64 contract (module
-        docstring): checked by `canonical.require_canonical`, then
-        converted into an object-dtype array of exact Python ints for the
-        internal math.
+    def _coerce(self, a: np.ndarray, op: str, batched: bool = False) -> np.ndarray:
+        """Boundary for the public uint64 contract (module docstring):
+        shape first — trailing axes must be `(limbs, d)`, and only the
+        batched (elementwise) ops accept leading axes on top — then
+        `canonical.require_canonical` for dtype and residue range, then
+        conversion to an object-dtype array of exact Python ints for the
+        internal math. The shape gate lives here because `canonical.py`
+        deliberately leaves shape to the caller, and without it a
+        `(k, limbs, d)` stack fed to a per-element op would silently read
+        the batch axis as limbs.
         """
-        require_canonical(a, self.q_moduli, f"{self._op_prefix}.{op}")
+        context = f"{self._op_prefix}.{op}"
+        want = (len(self.q_moduli), self.d)
+        shape = getattr(a, "shape", None)
+        if shape is None or (shape[-2:] if batched else shape) != want:
+            raise ValueError(
+                f"{context}: expected {'a stack of ' if batched else ''}"
+                f"(limbs, d) = {want} arrays, got shape {shape!r}"
+            )
+        require_canonical(a, self.q_moduli, context)
         return a.astype(object)
 
     def _reduce(self, arr: np.ndarray) -> np.ndarray:
@@ -247,17 +274,17 @@ class _HostRingBase:
         return (arr % self._q_col).astype(np.uint64)
 
     def add(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        a = self._coerce(a, "add")
-        b = self._coerce(b, "add")
+        a = self._coerce(a, "add", batched=True)
+        b = self._coerce(b, "add", batched=True)
         return self._reduce(a + b)
 
     def sub(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        a = self._coerce(a, "sub")
-        b = self._coerce(b, "sub")
+        a = self._coerce(a, "sub", batched=True)
+        b = self._coerce(b, "sub", batched=True)
         return self._reduce(a - b)
 
     def neg(self, a: np.ndarray) -> np.ndarray:
-        a = self._coerce(a, "neg")
+        a = self._coerce(a, "neg", batched=True)
         return self._reduce(-a)
 
     def mul_scalar(self, a: np.ndarray, s: int) -> np.ndarray:
@@ -266,16 +293,67 @@ class _HostRingBase:
         mod each limb's own modulus by the `%` below -- the same
         shared-scalar convention as `mul_scalar_then_sub` below, just
         without the accumulate-and-subtract."""
-        a = self._coerce(a, "mul_scalar")
+        a = self._coerce(a, "mul_scalar", batched=True)
         return self._reduce(a * s)
 
     def mul_scalar_then_sub(self, a: np.ndarray, s: int, acc: np.ndarray) -> np.ndarray:
         """`acc - a*s` (lattigo `MulScalarThenSub`, operations.go):
         `s` is a single scalar shared across every limb, reduced mod each
         limb's own modulus by the `%` below."""
-        a = self._coerce(a, "mul_scalar_then_sub")
-        acc = self._coerce(acc, "mul_scalar_then_sub")
+        a = self._coerce(a, "mul_scalar_then_sub", batched=True)
+        acc = self._coerce(acc, "mul_scalar_then_sub", batched=True)
         return self._reduce(acc - a * s)
+
+    def matvec(self, matrix: np.ndarray, vector: np.ndarray) -> np.ndarray:
+        """`A·s` over module stacks: `(rows, cols, limbs, d) ×
+        (cols, limbs, d) → (rows, limbs, d)`, composed from the subclass's
+        own `mul` and `add` — the NTT-domain product for `HostRnsRing`
+        (mirroring the traced `RnsRing.matvec`), the coefficient-domain
+        schoolbook one for `HostSplitRing`, where it doubles as the oracle
+        an accelerated split-domain matvec is checked against."""
+        limbs_d = (len(self.q_moduli), self.d)
+        mshape = getattr(matrix, "shape", None)
+        vshape = getattr(vector, "shape", None)
+        if (
+            mshape is None
+            or len(mshape) != 4
+            or mshape[1] == 0
+            or mshape[2:] != limbs_d
+            or vshape != (mshape[1],) + limbs_d
+        ):
+            raise ValueError(
+                f"{self._op_prefix}.matvec: expected (rows, cols, limbs, d) × "
+                f"(cols, limbs, d) with cols >= 1 and (limbs, d) = {limbs_d}, "
+                f"got {mshape!r} × {vshape!r}"
+            )
+        return np.stack(
+            [
+                functools.reduce(
+                    self.add,
+                    (self.mul(entry, coeff) for entry, coeff in zip(row, vector)),
+                )
+                for row in matrix
+            ]
+        )
+
+    def scale(self, element: np.ndarray, stack: np.ndarray) -> np.ndarray:
+        """The module scalar action `element · stack[i]` per row — `matvec`'s
+        rank-one sibling (a challenge acting on a commitment vector is the
+        canonical caller), one subclass `mul` per element of the stack."""
+        limbs_d = (len(self.q_moduli), self.d)
+        shape = getattr(stack, "shape", None)
+        if shape is None or len(shape) != 3 or shape[1:] != limbs_d:
+            raise ValueError(
+                f"{self._op_prefix}.scale: expected a (k, limbs, d) stack with "
+                f"(limbs, d) = {limbs_d}, got {shape!r}"
+            )
+        return np.stack([self.mul(element, row) for row in stack])
+
+    def from_signed_stack(self, rows) -> np.ndarray:
+        """`from_signed` per row: a `(k, d)` array (or sequence of length-`d`
+        rows) of raw signed ints to a `(k, limbs, d)` canonical stack — the
+        constructor the module convention pairs with `matvec`/`scale`."""
+        return np.stack([self.from_signed(row) for row in rows])
 
     def galois(self, a: np.ndarray, k: int) -> np.ndarray:
         """`roots.galois_map`'s action, one coefficient at a time.
