@@ -41,6 +41,24 @@ class NormsTest(parameterized.TestCase):
         self.assertEqual(norms.l2_squared(values), 2 * (1 << 80))
         self.assertEqual(norms.linf(values), 1 << 40)
 
+    def test_l2_squared_survives_an_object_array_of_numpy_scalars(self) -> None:
+        """`dtype=object` is not what makes the arithmetic exact.
+
+        An object array can hold `numpy.int64` *scalars*, whose `*` wraps at
+        64 bits exactly like the fixed-width array they came from — so the
+        coercion has to reach the elements, not just the array.
+        """
+        values = np.array([np.int64(1 << 40), np.int64(-(1 << 40))], dtype=object)
+        self.assertEqual(norms.l2_squared(values), 2 * (1 << 80))
+
+    def test_l2_squared_accepts_a_one_shot_iterable(self) -> None:
+        """A generator has no shape and can only be walked once."""
+        self.assertEqual(norms.l2_squared(iter([3, 4])), 25)
+
+    def test_l2_squared_flattens_a_multi_axis_input(self) -> None:
+        values = np.array([[3, 4], [0, 12]], dtype=np.int64)
+        self.assertEqual(norms.l2_squared(values), 169)
+
     def test_the_two_reconstructions_norm_the_tie_one_apart(self) -> None:
         """The one-off the two readings produce at exactly `Q/2` — the reason
         the norms take a lift, not residues (rationale in `norms.py`)."""
