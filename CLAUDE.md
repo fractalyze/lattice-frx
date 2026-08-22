@@ -44,6 +44,12 @@ each module is here, and where the repo sits relative to the other
   that provably cannot live on typed tuples) are in
   [docs/ring-representation.md](docs/ring-representation.md) — read it
   before proposing either a `negacyclic_ring` dtype or a `Module` class.
+  **The ring owns the module ops** — `matvec`, `scale`, `from_signed_stack`,
+  and leading batch axes on the elementwise family. A consumer that writes
+  its own `[ring.mul(...) for row in stack]` loop is reimplementing the
+  shape convention per consumer, which is exactly what "not a new type"
+  bets against; add the op here instead, and let the accelerated backend
+  inherit one definition.
 - **The array contract has one definition**, in `canonical.py`
   (`is_canonical` to ask, `require_canonical` to enforce): `dtype=uint64`,
   every residue below its own limb's modulus. Call it; never re-hand-write
