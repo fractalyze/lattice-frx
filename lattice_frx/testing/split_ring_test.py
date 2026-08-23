@@ -282,14 +282,30 @@ class SplitRingModuleTest(absltest.TestCase):
         rng = np.random.default_rng(12)
         a = _random_stack(rng, ring, 4)
         b = _random_stack(rng, ring, 4)
+        k = 2 * ring.d - 1  # σ₋₁ : X ↦ X^{-1}
         for got, want_fn in [
             (ring.add(a, b), lambda i: ring.add(a[i], b[i])),
             (ring.sub(a, b), lambda i: ring.sub(a[i], b[i])),
             (ring.neg(a), lambda i: ring.neg(a[i])),
             (ring.mul_scalar(a, 7), lambda i: ring.mul_scalar(a[i], 7)),
+            (ring.galois(a, k), lambda i: ring.galois(a[i], k)),
         ]:
             for i in range(4):
                 np.testing.assert_array_equal(got[i], want_fn(i))
+
+    def test_galois_batches_over_nested_axes(self):
+        """`σ_k` over a matrix-shaped stack: the batch axes are carried,
+        not read as limbs. LNP's Fig. 6 lifts whole module vectors through
+        `σ`, so the op has to survive more than one leading axis."""
+        ring = _ring()
+        rng = np.random.default_rng(17)
+        stack = _random_stack(rng, ring, 2, 3)
+        k = 2 * ring.d - 1
+        got = ring.galois(stack, k)
+        self.assertEqual(got.shape, stack.shape)
+        for i in range(2):
+            for j in range(3):
+                np.testing.assert_array_equal(got[i, j], ring.galois(stack[i, j], k))
 
     def test_matvec_shape_mismatches_raise(self):
         ring = _ring()
@@ -303,15 +319,14 @@ class SplitRingModuleTest(absltest.TestCase):
             ring.matvec(matrix[:, :0], np.empty((0,) + matrix.shape[2:], np.uint64))
 
     def test_a_per_element_op_rejects_a_stack(self):
-        """`mul`/`galois`/`to_split` read axis 0 as limbs — a stack there
-        must raise, not silently misread the batch axis."""
+        """`mul`/`to_split` read axis 0 as limbs — a stack there must raise,
+        not silently misread the batch axis. `galois` is deliberately absent:
+        it is elementwise, so it batches (see the tests above)."""
         ring = _ring()
         rng = np.random.default_rng(14)
         stack = _random_stack(rng, ring, 2)
         with self.assertRaisesRegex(ValueError, r"^SplitRing\.mul"):
             ring.mul(stack, stack)
-        with self.assertRaisesRegex(ValueError, r"^SplitRing\.galois"):
-            ring.galois(stack, 3)
         with self.assertRaisesRegex(ValueError, r"^SplitRing\.to_split"):
             ring.to_split(stack)
 

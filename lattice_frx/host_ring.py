@@ -225,12 +225,12 @@ class _HostRingBase:
     (`(k, limbs, d)`), a matrix a `(rows, cols, limbs, d)` stack — the
     module layer is a shape convention, not a type (see
     `docs/ring-representation.md`). The purely elementwise ops
-    (`add`/`sub`/`neg`/`mul_scalar`/`mul_scalar_then_sub`) accept any
-    leading batch axes and apply per element; `matvec` composes the
+    (`add`/`sub`/`neg`/`mul_scalar`/`mul_scalar_then_sub`/`galois`) accept
+    any leading batch axes and apply per element; `matvec` composes the
     subclass's `mul`/`add` over such stacks. Everything else
-    (`mul`, `galois`, the transforms, the lifts) takes exactly one
-    `(limbs, d)` element — a batched input there raises rather than
-    silently reading the batch axis as limbs.
+    (`mul`, the transforms, the lifts) takes exactly one `(limbs, d)`
+    element — a batched input there raises rather than silently reading the
+    batch axis as limbs.
     """
 
     backend = "reference"
@@ -482,12 +482,20 @@ class _HostRingBase:
         """`roots.galois_map`'s action, one coefficient at a time.
 
         Coefficient-domain by definition; the NTT-domain action lives on the
-        traced ring as `galois_eval`, checked against this oracle."""
-        a = self._coerce(a, "galois")
+        traced ring as `galois_eval`, checked against this oracle.
+
+        Elementwise, so it carries leading batch axes like `add`/`neg`: `σ_k`
+        of a module vector is `σ_k` of each of its elements, and a consumer
+        lifting a whole vector through an automorphism — LNP's Fig. 6 lifts
+        `(s1, m)` and the masking `y` — would otherwise spell that loop
+        itself. The traced `RnsRing.galois` already batches, transforming on
+        `axis=-1`; this is the host oracle matching the contract rather than
+        forking it."""
+        a = self._coerce(a, "galois", batched=True)
         dest, negate = galois_map(self.d, k)
         out = np.zeros_like(a)
         for i, (j, neg) in enumerate(zip(dest, negate)):
-            out[:, j] = -a[:, i] if neg else a[:, i]
+            out[..., j] = -a[..., i] if neg else a[..., i]
         return self._reduce(out)
 
     def from_signed(self, vals) -> np.ndarray:
