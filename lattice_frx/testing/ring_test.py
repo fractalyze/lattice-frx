@@ -254,6 +254,25 @@ class RingTest(parameterized.TestCase):
         got = dev.to_host(dev.galois(dev.coeff_from_host(host), k))
         self.assertTrue(np.array_equal(got, ref.galois(host, k)))
 
+    def test_galois_agrees_with_the_reference_over_a_stack(self) -> None:
+        """The batched contract, on both rings at once.
+
+        `σ_k` is elementwise, so it carries leading batch axes on either
+        ring, and the two must agree there and not only per element — a
+        consumer that lifts a whole module vector through an automorphism
+        reads the batched answer. This is the property that would silently
+        fork if only one of the rings carried the axes."""
+        ref, dev = rings()
+        k = 2 * _D - 1  # σ₋₁, the automorphism the LNP challenge space fixes
+        hosts = [_random_host(56 + i) for i in range(3)]
+        want = ref.galois(np.stack(hosts), k)
+        got = dev.galois(dev.stack([dev.coeff_from_host(h) for h in hosts]), k)
+        # `to_host` is a per-element lift, so the traced side is read back a
+        # row at a time — `_row`'s reason for existing.
+        for i, host in enumerate(hosts):
+            self.assertTrue(np.array_equal(want[i], ref.galois(host, k)))
+            self.assertTrue(np.array_equal(dev.to_host(_row(got, i)), want[i]))
+
     def test_galois_is_a_ring_automorphism(self) -> None:
         """`σ_k(a·b) = σ_k(a)·σ_k(b)`, through the ring's own transform."""
         _, dev = rings()
