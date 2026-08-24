@@ -424,16 +424,23 @@ class _HostRingBase:
             return self.zeros(*lead, *shape[1:-2])
 
         flat = stack.reshape(shape[0], -1, *shape[-2:])
-        # Both orders give the same set. Staging it is ~2x quicker at a
-        # short trailing run (one limb, d = 64) and converges to parity as
-        # `limbs * d` grows, so the order is a preference, not a result.
-        occupied = np.flatnonzero(flat.any(axis=0).any(axis=(-2, -1)))
-        # A stack occupying every position — a rank-3 one always does,
-        # having exactly one — would pay a copy for a narrowing that drops
-        # nothing, so it is read and written whole instead.
-        taken = slice(None) if len(occupied) == flat.shape[1] else occupied
+        # Narrowing buys a shorter fold and costs a gather, so it pays
+        # only when it drops enough to cover one — measured break-even is
+        # near three-quarters occupied, where testing for `== positions`
+        # instead makes a dense stack with one empty position pay 9%. A
+        # single position (every rank-3 stack has one) can never drop
+        # anything, so it does not even scan.
+        positions = flat.shape[1]
+        taken = slice(None)
+        if positions > 1:
+            # Both reduction orders give the same set; this one is
+            # quicker at the short trailing runs a small `limbs * d`
+            # gives, and the gap closes as it grows. A preference.
+            occupied = np.flatnonzero(flat.any(axis=0).any(axis=(-2, -1)))
+            if 4 * len(occupied) < 3 * positions:
+                taken = occupied
         terms = flat[:, taken].astype(object)
-        out = self.zeros(len(weights), flat.shape[1])
+        out = self.zeros(len(weights), positions)
         for i, row in enumerate(weights):
             scalars = [int(w) for w in row]
             total = terms[0] * scalars[0]
