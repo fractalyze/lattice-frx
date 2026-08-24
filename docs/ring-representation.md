@@ -55,12 +55,12 @@ Every other op is pointwise per limb or transforms `axis=-1`, so batching is
 what the ops already do. Two ops read the leading axes rather than mapping
 over them, and both *contract* one: `matvec` against ring elements, and
 `combine` against plain `Z_q` scalars (`Σ_u w_u · stack[u]` — a Fiat-Shamir
-aggregation's weights are the caller that wants it). `combine` takes either a
-single weight vector or a `(rows, terms)` matrix of them, so a caller weighting
-one stack by every row of a challenge matrix makes one call rather than one per
-row. Whatever a stack carries past the contracted axis rides along, so
-`combine` serves a stack of elements and a stack of whole matrix rows with one
-call.
+aggregation's weights are the caller that wants it). `combine`'s weights may
+themselves carry a batch axis — one, at most — so a caller weighting one
+stack by every row of a challenge matrix hands the matrix down whole rather
+than calling per row.
+Whatever a stack carries past the contracted axis rides along, so `combine`
+serves a stack of elements and a stack of whole matrix rows alike.
 
 The rest of the convention is its constructors and constants, and they are
 here for the same reason `matvec` is — so that a consumer reaches for the
