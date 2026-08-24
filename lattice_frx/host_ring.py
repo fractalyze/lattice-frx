@@ -424,9 +424,9 @@ class _HostRingBase:
             return self.zeros(*lead, *shape[1:-2])
 
         flat = stack.reshape(shape[0], -1, *shape[-2:])
-        # Either reduction order gives the same set; this one is ~2x
-        # quicker at this consumer's short trailing run and a wash once
-        # `limbs * d` passes a few hundred.
+        # Both orders give the same set. Staging it is ~2x quicker at a
+        # short trailing run (one limb, d = 64) and converges to parity as
+        # `limbs * d` grows, so the order is a preference, not a result.
         occupied = np.flatnonzero(flat.any(axis=0).any(axis=(-2, -1)))
         # A stack occupying every position — a rank-3 one always does,
         # having exactly one — would pay a copy for a narrowing that drops
