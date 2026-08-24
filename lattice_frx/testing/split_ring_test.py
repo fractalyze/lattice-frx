@@ -425,11 +425,10 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
         occupied ones are unchanged.
 
         `combine` skips the unoccupied positions instead of carrying them
-        through the exact-integer fold — an LNP garbage aggregation reaches
-        it with 3 of 256 matrix positions occupied. The saving is only sound
-        if the skip is exactly the all-zero set, so this pins both halves:
-        the occupied positions still match the fold, and the rest are the
-        zero they sum to."""
+        through the exact-integer fold. The saving is only sound if the
+        skip is exactly the all-zero set, so this pins both halves: the
+        occupied positions still match the fold, and the rest are the zero
+        they sum to."""
         ring = _ring()
         rng = np.random.default_rng(25)
         values = ring.zeros(4, 5)
@@ -479,9 +478,14 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
         np.testing.assert_array_equal(got, ring.zeros(5))
 
     def test_combine_checks_the_array_contract_over_the_whole_stack(self):
-        """The contract gate covers every position, not just the occupied
-        ones — narrowing to the support is an arithmetic saving and must not
-        become a narrower check."""
+        """A stack that breaks the array contract is rejected, narrowing
+        or no narrowing.
+
+        The skip cannot itself hide a bad residue — one is `>= q >= 2`,
+        so it is nonzero, so it is always occupied. What this pins is that
+        `combine` still routes the stack through the contract gate at all:
+        deleting that call is otherwise invisible here, since the fold
+        neither reads nor produces a residue out of range."""
         ring = _ring()
         rng = np.random.default_rng(26)
         values = _random_stack(rng, ring, 4, 5)
