@@ -229,10 +229,9 @@ class _HostRingBase:
     (`add`/`sub`/`neg`/`mul_scalar`/`mul_scalar_then_sub`/`galois`) accept
     any leading batch axes and apply per element; `matvec` composes the
     subclass's `mul`/`add` over such stacks, and `combine` contracts one
-    against `Z_q` scalars. Everything else
-    (`mul`, the transforms, the lifts) takes exactly one `(limbs, d)`
-    element — a batched input there raises rather than silently reading the
-    batch axis as limbs.
+    against `Z_q` scalars. Everything else (`mul`, the transforms, the
+    lifts) takes exactly one `(limbs, d)` element — a batched input there
+    raises rather than silently reading the batch axis as limbs.
     """
 
     backend = "reference"
@@ -375,7 +374,8 @@ class _HostRingBase:
         batch of them — `(rows, terms)` in, one sum per row out. Rank 2 is
         where it stops because that is the shape the caller arrives with:
         an aggregation weights one stack by every row of a challenge
-        matrix, and a call per row re-walks the whole stack each time.
+        matrix, and a call per row re-walks the whole stack each time —
+        a cost that grows with the row count.
 
         Accumulated in exact Python ints and reduced **once** at the end,
         rather than folded as `add(acc, mul_scalar(...))` per term, which
@@ -424,17 +424,22 @@ class _HostRingBase:
             return self.zeros(*lead, *shape[1:-2])
 
         flat = stack.reshape(shape[0], -1, *shape[-2:])
-        # Reducing the contracted axis first keeps the running buffer in
-        # cache; the other order walks the same bytes 2.8x slower.
+        # Either reduction order gives the same set; this one is ~2x
+        # quicker at this consumer's short trailing run and a wash once
+        # `limbs * d` passes a few hundred.
         occupied = np.flatnonzero(flat.any(axis=0).any(axis=(-2, -1)))
-        terms = flat[:, occupied].astype(object)
+        # A stack occupying every position — a rank-3 one always does,
+        # having exactly one — would pay a copy for a narrowing that drops
+        # nothing, so it is read and written whole instead.
+        taken = slice(None) if len(occupied) == flat.shape[1] else occupied
+        terms = flat[:, taken].astype(object)
         out = self.zeros(len(weights), flat.shape[1])
         for i, row in enumerate(weights):
             scalars = [int(w) for w in row]
             total = terms[0] * scalars[0]
             for term, weight in zip(terms[1:], scalars[1:]):
                 total = total + term * weight
-            out[i, occupied] = self._reduce(total)
+            out[i, taken] = self._reduce(total)
         return out.reshape(*lead, *shape[1:])
 
     def zeros(self, *lead: int) -> np.ndarray:

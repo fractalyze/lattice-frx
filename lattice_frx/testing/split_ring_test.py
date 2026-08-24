@@ -426,9 +426,7 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
 
         `combine` skips the unoccupied positions instead of carrying them
         through the exact-integer fold. The saving is only sound if the
-        skip is exactly the all-zero set, so this pins both halves: the
-        occupied positions still match the fold, and the rest are the zero
-        they sum to."""
+        skip is exactly the all-zero set."""
         ring = _ring()
         rng = np.random.default_rng(25)
         values = ring.zeros(4, 5)
