@@ -383,10 +383,10 @@ class _HostRingBase:
         at d = 64, and the caller that would otherwise write the fold is a
         verifier's inner loop.
 
-        Only the ride-along positions the stack actually occupies reach
-        that fold. A position that is zero across the whole contracted
+        Only the ride-along positions the stack actually occupies need
+        reach that fold. A position that is zero across the whole contracted
         axis sums to zero for every weight, so skipping it is exact rather
-        than approximate, and finding those positions costs about what the
+        than approximate, and finding those positions costs less than the
         contract check over the same array does. The caller this is sized
         for is an LNP garbage aggregation (eprint 2022/284, Fig. 8), which
         arrives with 3 of 256 matrix positions occupied over a 41.8 MB
@@ -424,20 +424,24 @@ class _HostRingBase:
             return self.zeros(*lead, *shape[1:-2])
 
         flat = stack.reshape(shape[0], -1, *shape[-2:])
-        # Narrowing buys a shorter fold and costs a gather, so it pays
-        # only when it drops enough to cover one — measured break-even is
-        # near three-quarters occupied, where testing for `== positions`
-        # instead makes a dense stack with one empty position pay 9%. A
-        # single position (every rank-3 stack has one) can never drop
-        # anything, so it does not even scan.
+        # With a single position — every rank-3 stack has one — the scan
+        # can only pay when the whole stack is zero, and a pass over the
+        # array on every element-stack call is too much to spend catching
+        # that.
         positions = flat.shape[1]
         taken = slice(None)
         if positions > 1:
-            # Both reduction orders give the same set; this one is
-            # quicker at the short trailing runs a small `limbs * d`
-            # gives, and the gap closes as it grows. A preference.
+            # Both reduction orders give the same set; this one is worth
+            # up to ~1.3x of a sparse call at small `limbs * d` and ~1% at
+            # large, so it is not free, but it is not load-bearing either.
             occupied = np.flatnonzero(flat.any(axis=0).any(axis=(-2, -1)))
-            if 4 * len(occupied) < 3 * positions:
+            # Narrow whenever there is anything to drop, rather than at a
+            # tuned occupancy. Break-even measures anywhere over 80-92%
+            # depending on shape, so no one constant is right, and nothing
+            # in the suite can catch one set wrong — every policy this
+            # line could hold leaves the tests green. The price of the
+            # simple rule is about 5% on a nearly-full stack.
+            if len(occupied) < positions:
                 taken = occupied
         terms = flat[:, taken].astype(object)
         out = self.zeros(len(weights), positions)
