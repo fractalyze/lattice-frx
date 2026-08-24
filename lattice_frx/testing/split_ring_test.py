@@ -390,6 +390,105 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, r"^SplitRing\.combine"):
             ring.combine([1] * len(ring.q_moduli), values[0])
 
+    def test_combine_batches_its_weights_like_the_rows_it_would_be_called_with(
+        self,
+    ):
+        """A rank-2 `weights` is a batch of the rank-1 sums, in order.
+
+        Pinned against `combine` itself rather than against a re-derived
+        fold: the arithmetic is already gated by the per-term-fold test
+        above, and what a batch axis can get wrong is the *layout* — a
+        transposed or misordered batch still sums correctly, so only the
+        per-row call it claims to batch can catch it."""
+        ring = _ring()
+        rng = np.random.default_rng(23)
+        gamma = rng.integers(0, ring.q_moduli[0], size=(3, 4))
+        for lead in ((), (3,), (2, 3)):
+            values = _random_stack(rng, ring, 4, *lead)
+            want = np.stack([ring.combine(row, values) for row in gamma])
+            np.testing.assert_array_equal(ring.combine(gamma, values), want)
+
+    def test_combine_over_no_terms_batches_the_zero_it_sums_to(self):
+        ring = _ring()
+        got = ring.combine(np.zeros((2, 0), dtype=np.uint64), ring.zeros(0, 3))
+        np.testing.assert_array_equal(got, ring.zeros(2, 3))
+
+    def test_combine_rejects_weights_that_are_neither_a_sum_nor_a_batch(self):
+        ring = _ring()
+        rng = np.random.default_rng(24)
+        values = _random_stack(rng, ring, 4)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.combine"):
+            ring.combine(np.zeros((2, 2, 4), dtype=np.uint64), values)
+
+    def test_combine_leaves_positions_with_no_support_zero(self):
+        """Positions the stack never occupies contract to zero, and the
+        occupied ones are unchanged.
+
+        `combine` skips the unoccupied positions instead of carrying them
+        through the exact-integer fold — an LNP garbage aggregation reaches
+        it with 3 of 256 matrix positions occupied. The saving is only sound
+        if the skip is exactly the all-zero set, so this pins both halves:
+        the occupied positions still match the fold, and the rest are the
+        zero they sum to."""
+        ring = _ring()
+        rng = np.random.default_rng(25)
+        values = ring.zeros(4, 5)
+        occupied = (1, 3)
+        for pos in occupied:
+            values[:, pos] = _random_stack(rng, ring, 4)
+        weights = rng.integers(0, ring.q_moduli[0], size=4)
+
+        got = ring.combine(weights, values)
+
+        want = ring.mul_scalar(values[0], int(weights[0]))
+        for value, weight in zip(values[1:], weights[1:]):
+            want = ring.add(want, ring.mul_scalar(value, int(weight)))
+        np.testing.assert_array_equal(got, want)
+        for pos in range(values.shape[1]):
+            if pos not in occupied:
+                np.testing.assert_array_equal(got[pos], ring.zeros())
+
+    def test_combine_finds_a_position_only_a_later_term_occupies(self):
+        """Occupancy is a property of the whole contracted axis.
+
+        A scan that settled for the first term would report this position
+        empty and drop a real contribution — silently, since the result
+        stays canonical and every round-trip built on it still agrees. It
+        is the one way the saving above can turn from exact into wrong, so
+        it gets its own case: term 0 is zero exactly where terms 1-3 are
+        not."""
+        ring = _ring()
+        rng = np.random.default_rng(27)
+        values = ring.zeros(4, 5)
+        values[1:, 2] = _random_stack(rng, ring, 3)
+        weights = rng.integers(1, ring.q_moduli[0], size=4)
+
+        got = ring.combine(weights, values)
+
+        want = ring.mul_scalar(values[0], int(weights[0]))
+        for value, weight in zip(values[1:], weights[1:]):
+            want = ring.add(want, ring.mul_scalar(value, int(weight)))
+        np.testing.assert_array_equal(got, want)
+        self.assertTrue(got[2].any(), "the later terms' contribution was dropped")
+
+    def test_combine_over_a_wholly_unoccupied_stack_is_zero(self):
+        """The empty-support edge of the skip above: nothing to contract."""
+        ring = _ring()
+        values = ring.zeros(4, 5)
+        got = ring.combine([1, 2, 3, 4], values)
+        np.testing.assert_array_equal(got, ring.zeros(5))
+
+    def test_combine_checks_the_array_contract_over_the_whole_stack(self):
+        """The contract gate covers every position, not just the occupied
+        ones — narrowing to the support is an arithmetic saving and must not
+        become a narrower check."""
+        ring = _ring()
+        rng = np.random.default_rng(26)
+        values = _random_stack(rng, ring, 4, 5)
+        values[2, 4, 0] = ring.q_moduli[0]
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.combine"):
+            ring.combine([1, 2, 3, 4], values)
+
     def test_zeros_is_the_additive_and_one_the_multiplicative_identity(self):
         ring = _ring()
         rng = np.random.default_rng(22)
