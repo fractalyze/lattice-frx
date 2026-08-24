@@ -227,7 +227,9 @@ class _HostRingBase:
     `docs/ring-representation.md`). The purely elementwise ops
     (`add`/`sub`/`neg`/`mul_scalar`/`mul_scalar_then_sub`/`galois`) accept
     any leading batch axes and apply per element; `matvec` composes the
-    subclass's `mul`/`add` over such stacks. Everything else
+    subclass's `mul`/`add` over such stacks, and `combine` contracts one
+    against `Z_q` scalars — taking either a single weight vector or a
+    `(rows, terms)` matrix of them. Everything else
     (`mul`, the transforms, the lifts) takes exactly one `(limbs, d)`
     element — a batched input there raises rather than silently reading the
     batch axis as limbs.
@@ -368,12 +370,14 @@ class _HostRingBase:
         rides along, so one call serves a stack of elements and a stack of
         whole matrix rows alike.
 
-        `weights` carries a leading batch axis the way the elementwise ops
-        carry theirs: rank 1 is one sum and returns the ride-along shape,
-        rank 2 is a batch of sums and returns it under a matching leading
-        axis. The aggregation this exists for weights the same stack by
-        every row of a challenge matrix, and one call per row re-walks the
-        whole stack each time.
+        `weights` may be rank 2, which is `matvec`'s own shape with `Z_q`
+        entries rather than ring ones: `(rows, terms)` against a
+        `(terms, ...)` stack, one sum per row. It is a second contraction
+        axis, not an elementwise batch axis — which is why the rank is
+        capped at 2 the way `matvec`'s is, rather than admitting the
+        arbitrary leading axes `add` and `galois` take. The aggregation
+        this exists for weights the same stack by every row of a challenge
+        matrix, and one call per row re-walks the whole stack each time.
 
         Accumulated in exact Python ints and reduced **once** at the end,
         rather than folded as `add(acc, mul_scalar(...))` per term, which
@@ -384,15 +388,24 @@ class _HostRingBase:
         Only the ride-along positions the stack actually occupies reach
         that fold. A position that is zero across the whole contracted
         axis sums to zero for every weight, so skipping it is exact rather
-        than approximate, and the scan that finds those positions is one
-        `any` over the `uint64` contract array — far cheaper than the
-        object-dtype conversion and exact-integer fold it saves. The caller
-        this is sized for is an LNP garbage aggregation (eprint 2022/284,
-        Fig. 8), which arrives with 3 of 256 matrix positions occupied over
-        a 41.8 MB stack: 208 ms to 24 ms, and to 17 ms once its weights
-        arrive batched. The alternative was for that consumer to scan its
+        than approximate. The scan reduces the contracted axis *first*, so
+        it accumulates into a buffer that stays in cache and costs about
+        what the contract check over the same array does — reducing the
+        ride-along axis first walks the same bytes 2.8x slower for the
+        identical answer. Either way it is far below the object-dtype
+        conversion and exact-integer fold it saves. The caller this is
+        sized for is an LNP garbage aggregation (eprint 2022/284, Fig. 8),
+        which arrives with 3 of 256 matrix positions occupied over a
+        41.8 MB stack: measured 11x there for the skip, and a further 1.3x
+        once its weights arrive as one matrix. The alternative was for that consumer to scan its
         own support and hand down a narrowed stack, which every next sparse
         consumer would then spell again.
+
+        The skip is this host oracle's cost model, not part of the op's
+        contract: occupancy is a property of live data, so a traced backend
+        contracts densely. `matvec`, the ring-element sibling, also
+        contracts densely today — the same skip applies to it, and is left
+        for the consumer that measures a need for it.
         """
         rows = np.asarray(weights, dtype=object)
         if rows.ndim not in (1, 2):
@@ -400,9 +413,8 @@ class _HostRingBase:
                 f"{self._op_prefix}.combine: expected weights of rank 1 (one "
                 f"sum) or rank 2 (a batch of them), got shape {rows.shape!r}"
             )
-        batched = rows.ndim == 2
-        if not batched:
-            rows = rows[None]
+        lead = rows.shape[:-1]  # () for one sum, (rows,) for a matrix of them
+        rows = np.atleast_2d(rows)
         shape = getattr(stack, "shape", None)
         if shape is None or len(shape) < 3:
             raise ValueError(
@@ -416,22 +428,23 @@ class _HostRingBase:
                 f"{self._op_prefix}.combine: got {rows.shape[1]} weights for a "
                 f"stack of {shape[0]} rows"
             )
-        lead = (len(rows),) if batched else ()
         if rows.shape[1] == 0:
             return self.zeros(*lead, *shape[1:-2])
 
-        tail = shape[-2:]
-        flat = stack.reshape(shape[0], -1, *tail)
-        occupied = np.flatnonzero(flat.any(axis=(0, -2, -1)))
-        terms = flat[:, occupied].astype(object)
-        out = np.zeros((len(rows), flat.shape[1], *tail), dtype=np.uint64)
+        flat = stack.reshape(shape[0], -1, *shape[-2:])
+        occupied = np.flatnonzero(flat.any(axis=0).any(axis=(-2, -1)))
+        # The gather is free when it drops something and a whole-stack copy
+        # when it does not, so a fully occupied stack skips it outright.
+        dense = len(occupied) == flat.shape[1]
+        terms = (flat if dense else flat[:, occupied]).astype(object)
+        out = self.zeros(len(rows), flat.shape[1])
         for i, row in enumerate(rows):
             scalars = [int(w) for w in row]
             total = terms[0] * scalars[0]
             for term, weight in zip(terms[1:], scalars[1:]):
                 total = total + term * weight
             out[i, occupied] = self._reduce(total)
-        return out.reshape(*lead, *shape[1:-2], *tail)
+        return out.reshape(*lead, *shape[1:])
 
     def zeros(self, *lead: int) -> np.ndarray:
         """The additive identity as a `lead + (limbs, d)` stack.

@@ -432,7 +432,7 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
         zero they sum to."""
         ring = _ring()
         rng = np.random.default_rng(25)
-        values = np.zeros((4, 5, len(ring.q_moduli), ring.d), dtype=np.uint64)
+        values = ring.zeros(4, 5)
         occupied = (1, 3)
         for pos in occupied:
             values[:, pos] = _random_stack(rng, ring, 4)
@@ -459,7 +459,7 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
         not."""
         ring = _ring()
         rng = np.random.default_rng(27)
-        values = np.zeros((4, 5, len(ring.q_moduli), ring.d), dtype=np.uint64)
+        values = ring.zeros(4, 5)
         values[1:, 2] = _random_stack(rng, ring, 3)
         weights = rng.integers(1, ring.q_moduli[0], size=4)
 
@@ -474,7 +474,7 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
     def test_combine_over_a_wholly_unoccupied_stack_is_zero(self):
         """The empty-support edge of the skip above: nothing to contract."""
         ring = _ring()
-        values = np.zeros((4, 5, len(ring.q_moduli), ring.d), dtype=np.uint64)
+        values = ring.zeros(4, 5)
         got = ring.combine([1, 2, 3, 4], values)
         np.testing.assert_array_equal(got, ring.zeros(5))
 
