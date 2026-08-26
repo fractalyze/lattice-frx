@@ -245,6 +245,11 @@ class _HostRingBase:
         self.q_moduli: tuple[int, ...] = tuple(int(q) for q in q_moduli)
         self.d = d
         self._q_col = np.array(self.q_moduli, dtype=object)[:, None]
+        # The same column in a fixed width, for the paths that stay inside
+        # int64 on purpose. Object dtype is what makes `_reduce` exact at
+        # any modulus; it is also ~19x slower, so a path that has already
+        # bounded its values wants this one.
+        self._q_int64 = np.array(self.q_moduli, dtype=np.int64)[:, None]
 
     def _require(self, a: np.ndarray, op: str, batched: bool = False) -> None:
         """Boundary for the public uint64 contract (module docstring):
@@ -286,6 +291,26 @@ class _HostRingBase:
         lossless by construction (moduli fit in uint64; see module
         docstring)."""
         return (arr % self._q_col).astype(np.uint64)
+
+    def _balanced(self, a: np.ndarray) -> np.ndarray:
+        """Per-limb balanced lift of a canonical stack, as `int64`.
+
+        `_reduce`'s inverse direction, and the counterpart of
+        `to_balanced_limb0` for the case where every limb is wanted and the
+        answer is per limb rather than the CRT reading — so it is a choice
+        of representative for arithmetic that stays modulo one limb, never
+        a reconstruction. `int64` because every modulus is below
+        `primes.MAX_MODULUS_BITS`, so a balanced residue is comfortably
+        inside the fixed width.
+
+        Private, and deliberately: a caller that wants the element's actual
+        signed value wants `rns.reconstruct_centered`, which is a different
+        number. What this is for is magnitude — the canonical contract
+        hides it, since a ternary `−1` is stored as `q−1`, the largest
+        residue there is.
+        """
+        signed = a.astype(np.int64)
+        return np.where(signed > self._q_int64 // 2, signed - self._q_int64, signed)
 
     def add(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         a = self._coerce(a, "add", batched=True)
