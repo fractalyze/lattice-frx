@@ -560,5 +560,144 @@ class SplitRingModuleConstantsTest(absltest.TestCase):
             ring.scale(signed[0], ring.zeros(0))
 
 
+class SplitRingMatmulTest(absltest.TestCase):
+    """`matmul` — the batched product, and the gate that decides how it is
+    computed.
+
+    Both of its paths must return the same bytes, so agreement with the
+    `matvec` oracle cannot by itself say which one ran. The gate is
+    therefore tested twice over: once directly against its arithmetic
+    bound, and once through operands chosen to land on either side of it.
+    This ring's own parameters put random full-width elements *past* the
+    bound (two ~30-bit limbs at d=16), so the fallback is what a careless
+    test would exercise exclusively.
+    """
+
+    def _oracle(self, ring, matrix, other):
+        """`matrix @ other` folded per entry from `mul` and `add`.
+
+        Deliberately *not* `matvec` per column: that is verbatim what
+        `matmul`'s own fallback does, so an oracle spelled that way would
+        compare the fallback against a copy of itself — and this ring's
+        parameters put full-width operands on the fallback, which is most
+        of what this class tests. Folding from `mul` reaches the schoolbook
+        convolution instead, which is the thing actually worth agreeing
+        with. Same shape as `test_matvec_matches_the_per_entry_composition`.
+        """
+        rows, cols = matrix.shape[:2]
+        width = other.shape[1]
+        out = ring.zeros(rows, width)
+        for r in range(rows):
+            for w in range(width):
+                acc = ring.mul(matrix[r, 0], other[0, w])
+                for c in range(1, cols):
+                    acc = ring.add(acc, ring.mul(matrix[r, c], other[c, w]))
+                out[r, w] = acc
+        return out
+
+    def test_matmul_agrees_on_both_sides_of_the_gate(self):
+        """The point of the op: a small left operand takes the batched
+        path, a full-width one falls back, and both equal the oracle.
+
+        `ternary` is the shape the LNP consumer actually passes — a
+        `Bin_1` challenge matrix, whose `−1` is `q−1` in the canonical
+        contract and only becomes small under the balanced lift.
+        """
+        ring = _ring()
+        rng = np.random.default_rng(31)
+        other = _random_stack(rng, ring, 3, 2)
+        ternary = ring.from_signed_stack(
+            rng.integers(-1, 2, size=(4 * 3, ring.d))
+        ).reshape(4, 3, len(ring.q_moduli), ring.d)
+        wide = _random_stack(rng, ring, 4, 3)
+
+        self.assertTrue(ring._fits_int64(ternary, other))
+        self.assertFalse(ring._fits_int64(wide, other))
+        for matrix in (ternary, wide):
+            np.testing.assert_array_equal(
+                ring.matmul(matrix, other), self._oracle(ring, matrix, other)
+            )
+
+    def test_the_gate_is_its_arithmetic_bound(self):
+        """The gate against the bound `_fits_int64` documents, point by
+        point. A gate whose conditions are slack still passes every honest
+        round-trip when its constant is wrong, so the value itself is what
+        gets checked, not just its effect.
+        """
+        ring = _ring()
+        cols, d = 3, ring.d
+
+        def at_magnitude(value):
+            """A `(1, cols)` stack whose balanced lift is exactly `value`."""
+            row = np.full(d, value)
+            return ring.from_signed_stack([row] * cols).reshape(
+                1, cols, len(ring.q_moduli), d
+            )
+
+        # The largest magnitude the bound admits on both operands at once.
+        fits = int(math.isqrt((2**63 - 1) // (cols * d)))
+        # Reachable only because a balanced residue here runs to q/2; if a
+        # future test ring shrank its moduli the boundary would stop being
+        # representable and this test would be checking nothing.
+        self.assertLess(fits + 1, min(ring.q_moduli) // 2)
+        for magnitude in (1, fits, fits + 1, min(ring.q_moduli) // 2):
+            want = cols * d * magnitude * magnitude < 2**63
+            self.assertEqual(
+                ring._fits_int64(at_magnitude(magnitude), at_magnitude(magnitude)),
+                want,
+                f"gate disagrees with its bound at |a|inf = |b|inf = {magnitude}",
+            )
+
+    def test_matmul_shape_mismatches_raise(self):
+        ring = _ring()
+        rng = np.random.default_rng(32)
+        matrix = _random_stack(rng, ring, 4, 3)
+        other = _random_stack(rng, ring, 3, 2)
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matmul"):
+            ring.matmul(matrix, _random_stack(rng, ring, 2, 2))  # cols mismatch
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matmul"):
+            ring.matmul(matrix[0], other)  # 3-D matrix
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matmul"):
+            ring.matmul(matrix, other[:, 0])  # 3-D other
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matmul"):
+            # No columns to contract, as `matvec` rejects for the same reason.
+            ring.matmul(matrix[:, :0], other[:0])
+
+    def test_matmul_checks_the_contract_it_never_multiplies(self):
+        """`matmul`'s share of the rule `matvec` pins in
+        `test_the_empty_case_still_enforces_the_operand_contract`."""
+        ring = _ring()
+        rng = np.random.default_rng(33)
+        matrix = ring.zeros(0, 3)
+        other = _random_stack(rng, ring, 3, 2)
+        self.assertEqual(ring.matmul(matrix, other).shape, (0, 2) + other.shape[2:])
+        broken = other.copy()
+        broken[0, 0, 0, 0] = ring.q_moduli[0]
+        with self.assertRaisesRegex(ValueError, r"^SplitRing\.matmul"):
+            ring.matmul(matrix, broken)
+
+    def test_matmul_is_associative_against_matvec(self):
+        """`(A·B)·x = A·(B·x)` — the property a matmul owes the matvec it
+        generalises, and an end-to-end check that the batched contraction
+        composes rather than merely agreeing entrywise.
+
+        `a` is ternary so the batched path is the one that runs: at this
+        ring's moduli a full-width `a` fails the gate, and the test would
+        quietly assert `matvec` composition against itself.
+        """
+        ring = _ring()
+        rng = np.random.default_rng(34)
+        a = ring.from_signed_stack(rng.integers(-1, 2, size=(2 * 3, ring.d))).reshape(
+            2, 3, len(ring.q_moduli), ring.d
+        )
+        b = _random_stack(rng, ring, 3, 4)
+        x = _random_stack(rng, ring, 4)
+        self.assertTrue(ring._fits_int64(a, b))
+        np.testing.assert_array_equal(
+            ring.matvec(ring.matmul(a, b), x),
+            ring.matvec(a, ring.matvec(b, x)),
+        )
+
+
 if __name__ == "__main__":
     absltest.main()

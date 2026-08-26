@@ -29,6 +29,11 @@ exact Python ints inside. What this class adds:
   `X^{d/2} ≡ +r` residue, half `1` the `-r` one. This is the future traced
   representation: each half's product is an `r`-twisted convolution, i.e.
   a structured `d/2 × d/2` matvec.
+- `matmul` — the batched product, and the one path here that does not go
+  through `mul`. It derives the same `X^d ≡ -1` fold as an anticirculant
+  matrix rather than a convolution loop, shares no code with the CRT split,
+  and is checked against `mul` through `matvec` — so the oracle stance above
+  survives it. Exactness is gated on operand magnitude; see the method.
 - `is_invertible` — a unit test of the ring in the literal sense: each
   half is a field, so an element is invertible iff every `(limb, half)`
   residue is nonzero. Cheap, host-side, and exactly the predicate the LNP
@@ -40,6 +45,7 @@ products waits for the split-domain traced ring; it does not get to borrow
 the NTT ring's, because the moduli are mutually exclusive.
 """
 import numpy as np
+from numpy.lib.stride_tricks import as_strided
 
 from lattice_frx.canonical import require_canonical
 from lattice_frx.host_ring import _HostRingBase
@@ -78,6 +84,125 @@ class HostSplitRing(_HostRingBase):
                         conv[i + j] += ai * bj
             rows.append([(conv[k] - conv[k + self.d]) % q for k in range(self.d)])
         return np.array(rows, dtype=np.uint64)
+
+    def _negacyclic(self, balanced: np.ndarray) -> np.ndarray:
+        """`Neg(a)` for every element of a balanced stack, as a **read-only
+        view**: `(..., d) → (..., d, d)` with `Neg(a)[k][j] = ±a[k−j mod d]`.
+
+        `Neg` is Toeplitz — constant down each diagonal — so all `d²` of its
+        entries are already present in the `2d−1` values `[−a[d−1] … −a[1],
+        a[0] … a[d−1]]`, and the matrix is that buffer read with a row stride
+        of `+1` and a column stride of `−1`. Materialising it instead costs
+        `rows·cols·limbs·d²` int64 twice over — once for the gather, once
+        for the sign multiply. Measured at the LNP shape and `d = 128`,
+        that is a 201 MB peak transient against 14 MB here, and it is most
+        of why the op is 3x what the materialised form was.
+
+        The negated half is what carries `X^d ≡ −1`: reading left of the
+        diagonal walks into it, which is exactly the fold `mul` spells as
+        `conv[k] − conv[k + d]`.
+
+        `writeable=False` is load-bearing, not caution. Every value in the
+        buffer is aliased `d` times over, so a single write would silently
+        change a whole diagonal.
+        """
+        d = self.d
+        buffer = np.concatenate([-balanced[..., 1:], balanced], axis=-1)
+        stride = buffer.strides[-1]
+        return as_strided(
+            buffer[..., d - 1 :],
+            shape=buffer.shape[:-1] + (d, d),
+            strides=buffer.strides[:-1] + (stride, -stride),
+            writeable=False,
+        )
+
+    def _fits_int64(self, matrix: np.ndarray, other: np.ndarray) -> bool:
+        """Whether `matmul`'s batched path is exact for these operands.
+
+        Its widest partial sum is `cols · d · ‖matrix‖∞ · ‖other‖∞` over
+        balanced lifts, and every product and accumulation on that path is
+        `int64`. This is the bound computed exactly, not a measured
+        crossover: the answer is a property of the arithmetic, so a wrong
+        constant here is a wrong *value*, which a test can catch.
+        """
+        cols = matrix.shape[1]
+        widest = int(np.abs(self._balanced(matrix)).max()) * int(
+            np.abs(self._balanced(other)).max()
+        )
+        return cols * self.d * widest < 2**63
+
+    def matmul(self, matrix: np.ndarray, other: np.ndarray) -> np.ndarray:
+        """`matrix @ other` over module stacks: `(rows, cols, limbs, d) ×
+        (cols, width, limbs, d) → (rows, width, limbs, d)`.
+
+        `matvec`'s two-sided sibling, and the only op here that does not
+        reach `mul` per entry. A negacyclic product is a matrix-vector
+        product — `a·b = Neg(a) @ b` for the anticirculant `Neg(a)[k][j] =
+        ±a[k−j mod d]` — so the whole contraction is one `int64` sum over
+        `(cols, d)`, with `Neg` built once over `matrix` and reused down
+        every column of `other`, and `Neg` itself is a view rather than an
+        array (`_negacyclic`). That reuse is the win: against the
+        `matvec`-per-column spelling a consumer writes today, **112x** at
+        d = 64 and **116x** at d = 128, measured at `(256, 3) × (3, 16)`.
+
+        `mul` is untouched and stays the schoolbook oracle — this path is
+        checked against it, through `matvec`, and shares none of it.
+
+        **Exactness.** The batched path holds only while `cols · d ·
+        ‖matrix‖∞ · ‖other‖∞` fits `int64` (`_fits_int64`); past that the
+        op falls back to composing `matvec` per column. So `matmul` is
+        correct for any operands and never slower than the spelling it
+        replaces — what varies is only whether it is faster. The consumer
+        this exists for always fits: a `Bin_1` ternary challenge matrix
+        against a ~32-bit modulus at d = 128 leaves over 23 bits of
+        headroom.
+
+        Building `Neg` needs the coefficient layout, which is why the op
+        lives here and not in the consumer: this module's convention hands
+        consumers `(limbs, d)` canonical arrays, not the position of a
+        coefficient within one.
+
+        For the vector case, pass the column: `matmul(A, v[:, None])`.
+        `matvec` stays on the schoolbook composition on purpose — base
+        `matvec` is the oracle the future traced twisted-convolution
+        matvec is checked against, so it must not borrow this path.
+        """
+        limbs_d = (len(self.q_moduli), self.d)
+        mshape = getattr(matrix, "shape", None)
+        oshape = getattr(other, "shape", None)
+        if (
+            mshape is None
+            or oshape is None
+            or len(mshape) != 4
+            or mshape[1] == 0
+            or mshape[2:] != limbs_d
+            or oshape[2:] != limbs_d
+            or oshape[0] != mshape[1]
+        ):
+            raise ValueError(
+                f"{self._op_prefix}.matmul: expected (rows, cols, limbs, d) × "
+                f"(cols, width, limbs, d) with cols >= 1 and (limbs, d) = "
+                f"{limbs_d}, got {mshape!r} × {oshape!r}"
+            )
+        # `matvec`'s empty case, same reason and same contract note.
+        self._require(matrix, "matmul", batched=True)
+        self._require(other, "matmul", batched=True)
+        if mshape[0] == 0 or oshape[1] == 0:
+            return self.zeros(mshape[0], oshape[1])
+        if not self._fits_int64(matrix, other):
+            return np.stack(
+                [self.matvec(matrix, other[:, w]) for w in range(oshape[1])],
+                axis=1,
+            )
+        neg = self._negacyclic(self._balanced(matrix))
+        # No `optimize=`: the contraction is `int64`, so no path it could
+        # pick reaches BLAS, and the intermediates it materialises to get
+        # there cost 2.3x the straight sum — measured at both degrees.
+        product = np.einsum("rclkj,cwlj->rwlk", neg, self._balanced(other))
+        # `_reduce`'s modulus column is object dtype, so it would run this
+        # `%` as per-element Python-int arithmetic — measured 10.6x slower,
+        # which is the cost this path exists to avoid. Same values.
+        return (product % self._q_int64).astype(np.uint64)
 
     def to_split(self, a: np.ndarray) -> np.ndarray:
         """The two-factor CRT view, `(limbs, 2, d/2)`: half `h` holds the

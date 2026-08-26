@@ -52,12 +52,14 @@ A·s:      matvec — per limb, [.., m, k, d] × [.., k, d] → [.., m, d]  (Eva
 ```
 
 Every other op is pointwise per limb or transforms `axis=-1`, so batching is
-what the ops already do. Two ops read the leading axes rather than mapping
-over them, and both *contract* one: `matvec` against ring elements, and
-`combine` against plain `Z_q` scalars (`Σ_u w_u · stack[u]` — a Fiat-Shamir
-aggregation's weights are the caller that wants it). `combine`'s weights may
-themselves carry a batch axis, so a caller weighting one stack by every row of
-a challenge matrix hands the matrix down whole rather than calling per row.
+what the ops already do. Three ops read the leading axes rather than mapping
+over them, and all *contract* one: `matvec` against ring elements, `matmul`
+against a second stack of them (`matvec`'s two-sided sibling, on the
+partial-split ring only), and `combine` against plain `Z_q` scalars
+(`Σ_u w_u · stack[u]` — a Fiat-Shamir aggregation's weights are the caller
+that wants it). `combine`'s weights may themselves carry a batch axis, so a
+caller weighting one stack by every row of a challenge matrix hands the matrix
+down whole rather than calling per row.
 Whatever a stack carries past the contracted axis rides along, so `combine`
 serves a stack of elements and a stack of whole matrix rows alike.
 
