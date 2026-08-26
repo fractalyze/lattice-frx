@@ -18,6 +18,7 @@ traced zone, and a ring that silently falls out of one is the failure this
 file is meant to catch.
 """
 
+import frx
 import numpy as np
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -25,11 +26,6 @@ from absl.testing import parameterized
 from lattice_frx import primes
 from lattice_frx.domains import Coeff, Eval, Split
 from lattice_frx.split_ring import HostSplitRing, SplitRing
-
-try:  # `frx` is the ring under test's array layer; `jit`/`vmap` come from it.
-    import frx
-except ImportError:  # pragma: no cover - the bazel/pip lanes both provide it
-    frx = None
 
 _D = 16
 _Q_MODULI = tuple(primes.find_nearest_split_primes(30.0, 2))
@@ -40,9 +36,13 @@ def _rings() -> tuple[SplitRing, HostSplitRing]:
 
 
 def _random_canonical(rng, *lead: int) -> np.ndarray:
-    """A canonical host element, or a `lead`-shaped stack of them."""
-    rows = [rng.integers(0, q, lead + (_D,), dtype=np.uint64) for q in _Q_MODULI]
-    return np.moveaxis(np.stack(rows), 0, len(lead))
+    """A canonical host element, or a `lead`-shaped stack of them.
+
+    Drawn through the oracle's own `uniform_stack` rather than a local
+    reimplementation: the `(*lead, limbs, d)` axis order is the module
+    convention's, and `_HostRingBase` is what owns it.
+    """
+    return HostSplitRing(_Q_MODULI, _D).uniform_stack(rng, *lead)
 
 
 def _traced_product(ring, a: np.ndarray, b: np.ndarray, mul=None) -> np.ndarray:
@@ -234,18 +234,19 @@ class TracedSplitRingOpsTest(parameterized.TestCase):
         )
         np.testing.assert_array_equal(ring.to_host(ring.mul(a, one)), ring.to_host(a))
 
-    @parameterized.named_parameters(
-        ("add", "add"), ("sub", "sub"), ("neg", "neg"),
-    )
-    def test_the_elementwise_ops_match_the_host(self, op):
+    @parameterized.named_parameters(("add", "add"), ("sub", "sub"))
+    def test_the_binary_elementwise_ops_match_the_host(self, op):
         ring, host = _rings()
         rng = np.random.default_rng(13)
         a, b = _random_canonical(rng), _random_canonical(rng)
-        ca, cb = ring.coeff_from_host(a), ring.coeff_from_host(b)
-        args = (ca,) if op == "neg" else (ca, cb)
-        host_args = (a,) if op == "neg" else (a, b)
+        got = getattr(ring, op)(ring.coeff_from_host(a), ring.coeff_from_host(b))
+        np.testing.assert_array_equal(ring.to_host(got), getattr(host, op)(a, b))
+
+    def test_neg_matches_the_host(self):
+        ring, host = _rings()
+        a = _random_canonical(np.random.default_rng(13))
         np.testing.assert_array_equal(
-            ring.to_host(getattr(ring, op)(*args)), getattr(host, op)(*host_args)
+            ring.to_host(ring.neg(ring.coeff_from_host(a))), host.neg(a)
         )
 
     def test_mul_scalar_matches_the_host_and_commutes_with_to_split(self):
@@ -274,11 +275,6 @@ class TracedSplitRingOpsTest(parameterized.TestCase):
 
 class TracedSplitRingTracingTest(parameterized.TestCase):
     """The reason this ring exists beside the host one."""
-
-    def setUp(self):
-        super().setUp()
-        if frx is None:
-            self.skipTest("frx is not importable")
 
     def test_mul_holds_under_jit(self):
         ring, host = _rings()

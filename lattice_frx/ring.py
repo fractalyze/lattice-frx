@@ -32,13 +32,11 @@ is static.
 Which domain a value is in is part of what it is: pointwise `mul` is the ring's
 multiplication only in the NTT domain, and a balanced lift only means anything
 in the coefficient domain — same storage, different object. lattigo carries
-this as a runtime `IsNTT` flag per polynomial; here the information is static
-at trace time, so it is carried by the container type instead: `Coeff` and
-`Eval`, two one-field `NamedTuple`s over the same limbs tuple, defined with
-the rest of the domain machinery in `domains.py`. A flag would
-have been a trace-splitting branch for something the graph already knows; a
-type makes `mul(coeff, coeff)` a `TypeError` at trace time and costs the
-compiled graph nothing. The host contract carries no domain — a `(limbs, d)`
+this as a runtime `IsNTT` flag per polynomial; here it is carried by the
+container type instead, `Coeff` or `Eval`. Both live in `domains.py` with the
+rest of the domain machinery, which argues the choice against lattigo's flag
+in full — this ring's share of it is just that `mul` takes `Eval`. The host
+contract carries no domain — a `(limbs, d)`
 array is just bytes — so the two embedding constructors are named for the
 domain the caller is asserting, `coeff_from_host` and `eval_from_host`.
 
@@ -87,6 +85,11 @@ import numpy as np
 import zk_dtypes
 from frx import lax
 
+# `Coeff` and `Eval` are used throughout this module and re-exported by the
+# same line: they lived here before there was a second ring to share `Coeff`
+# with, and `from lattice_frx.ring import Coeff` is what consumers pin today.
+# `domains.py` is the home to point new code at; the pins move at the next
+# consumer bump, after which this is just an ordinary import.
 from lattice_frx.domains import Coeff, Eval, require_domain, same_domain
 from lattice_frx.roots import (
     bit_reverse,
@@ -98,9 +101,6 @@ from lattice_frx.roots import (
 )
 
 
-# `Coeff` and `Eval` are re-exported: they were defined here before there was
-# a second ring to share `Coeff` with, and `from lattice_frx.ring import Coeff`
-# is what consumers already pin.
 _DOMAINS = (Coeff, Eval)
 
 # Domain-generic ops take and return one domain, the same one; `mul` and

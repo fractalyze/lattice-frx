@@ -95,6 +95,15 @@ each module is here, and where the repo sits relative to the other
   and no prime is both. Never feed one family's primes to the other's
   ring — constructors guard it, and the guard's error names the other
   mode because a silent mix would surface as a consumer's soundness gap.
+- **Files split by layer, class names split by implementation.** The
+  `host_` prefix marks a class (`HostRnsRing`, `HostSplitRing`), not a
+  file: `host_ring.py` is a *layer* file holding `_HostRingBase` — the
+  host `(limbs, d)` contract both modes share — plus the NTT ring's host
+  class, while each mode's remaining classes live in its own mode file.
+  So `split_ring.py` holds both `SplitRing` and `HostSplitRing`, and
+  there is deliberately no `host_split_ring.py`. Do not "restore the
+  symmetry" — it would split host code across two files either way, and
+  moving `HostSplitRing` is a breaking change for every consumer pin.
 - **Two reference implementations disagree on purpose.** `rns.py` ports
   both, and the differences are real: reconstruction tie-breaking at
   exactly `Q/2`, and `pow2_cut` rounding where `rescale_floor` floors

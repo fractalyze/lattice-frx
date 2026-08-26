@@ -133,7 +133,13 @@ integers only. They take the lift rather than residues so the caller's
 choice between the two reconstructions — which disagree at exactly
 `Q/2` — stays visible at the call site.
 
-### `primes.py`, `canonical.py`
+### `domains.py`, `primes.py`, `canonical.py`
+
+Which domain a traced element is in, carried as its type — `Coeff` shared by
+both rings, `Eval` the NTT ring's and `Split` the partial-split one's — plus
+the two guards every traced op opens with. A ring passes its own pair, so the
+other ring's domain is refused at the guard rather than producing well-shaped
+nonsense.
 
 Prime search for both modulus families — NTT-friendly (`≡ 1 mod 2d`) and
 partial-split (`≡ 5 mod 8`), one shared walk — and the array contract
