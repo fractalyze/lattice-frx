@@ -34,7 +34,8 @@ multiplication only in the NTT domain, and a balanced lift only means anything
 in the coefficient domain — same storage, different object. lattigo carries
 this as a runtime `IsNTT` flag per polynomial; here the information is static
 at trace time, so it is carried by the container type instead: `Coeff` and
-`Eval`, two one-field `NamedTuple`s over the same limbs tuple. A flag would
+`Eval`, two one-field `NamedTuple`s over the same limbs tuple, defined with
+the rest of the domain machinery in `domains.py`. A flag would
 have been a trace-splitting branch for something the graph already knows; a
 type makes `mul(coeff, coeff)` a `TypeError` at trace time and costs the
 compiled graph nothing. The host contract carries no domain — a `(limbs, d)`
@@ -79,13 +80,14 @@ the host and says so, rather than pretending to be traceable and truncating.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, TypeVar
 
 import frx.numpy as fnp
 import numpy as np
 import zk_dtypes
 from frx import lax
 
+from lattice_frx.domains import Coeff, Eval, require_domain, same_domain
 from lattice_frx.roots import (
     bit_reverse,
     galois_map,
@@ -96,46 +98,14 @@ from lattice_frx.roots import (
 )
 
 
-class Coeff(NamedTuple):
-    """A coefficient-domain element: one `[..., d]` field array per limb."""
-
-    limbs: tuple[Any, ...]
-
-
-class Eval(NamedTuple):
-    """An NTT-domain element, in the contract's (lattigo's) bit-reversed order."""
-
-    limbs: tuple[Any, ...]
-
+# `Coeff` and `Eval` are re-exported: they were defined here before there was
+# a second ring to share `Coeff` with, and `from lattice_frx.ring import Coeff`
+# is what consumers already pin.
+_DOMAINS = (Coeff, Eval)
 
 # Domain-generic ops take and return one domain, the same one; `mul` and
 # `matvec` are not among them, which is the point of having the two types.
 _E = TypeVar("_E", Coeff, Eval)
-
-
-def _require_domain(op: str, domain: type, *values) -> None:
-    """Every operand in the one domain `op` is defined in, or a `TypeError`.
-
-    Variadic so an op is one call covering all operands — a per-operand
-    guard that forgets one would readmit, at that operand, the bug class
-    the types exist to kill.
-    """
-    for value in values:
-        if type(value) is not domain:
-            raise TypeError(
-                f"{op}: expected {domain.__name__}, got {type(value).__name__}"
-            )
-
-
-def _same_domain(op: str, *values) -> type:
-    """The shared domain of `values`, or a `TypeError` naming the mismatch."""
-    first = type(values[0])
-    if first not in (Coeff, Eval) or any(type(v) is not first for v in values[1:]):
-        raise TypeError(
-            f"{op}: operands must share a domain, got "
-            + ", ".join(type(v).__name__ for v in values)
-        )
-    return first
 
 
 class RnsRing:
@@ -230,7 +200,7 @@ class RnsRing:
         The opcode emits natural order; the gather is the adapter that presents
         the order this package's contract promises.
         """
-        _require_domain("ntt", Coeff, a)
+        require_domain("ntt", Coeff, a)
         return Eval(
             tuple(
                 fnp.take(
@@ -249,7 +219,7 @@ class RnsRing:
         opcode wants its own — and `NEGACYCLIC_INTT` applies the `1/d` scaling
         that lattigo folds into the tail of its GS network.
         """
-        _require_domain("intt", Eval, a)
+        require_domain("intt", Eval, a)
         return Coeff(
             tuple(
                 lax.ntt(
@@ -262,22 +232,22 @@ class RnsRing:
         )
 
     def add(self, a: _E, b: _E) -> _E:
-        domain = _same_domain("add", a, b)
+        domain = same_domain("add", _DOMAINS, a, b)
         return domain(tuple(x + y for x, y in zip(a.limbs, b.limbs)))
 
     def sub(self, a: _E, b: _E) -> _E:
-        domain = _same_domain("sub", a, b)
+        domain = same_domain("sub", _DOMAINS, a, b)
         return domain(tuple(x - y for x, y in zip(a.limbs, b.limbs)))
 
     def neg(self, a: _E) -> _E:
-        domain = _same_domain("neg", a)
+        domain = same_domain("neg", _DOMAINS, a)
         return domain(tuple(-x for x in a.limbs))
 
     def galois(self, a: Coeff, k: int) -> Coeff:
         """`σ_k : X ↦ X^k` on coefficients — one gather and one sign-select
         per limb, from `roots.galois_map`'s action inverted into a `take`
         table. Conformance against the host oracle is what pins it."""
-        _require_domain("galois", Coeff, a)
+        require_domain("galois", Coeff, a)
         src, negate = self._galois_table(k)
         gathered = tuple(fnp.take(limb, src, axis=-1) for limb in a.limbs)
         return Coeff(tuple(fnp.where(negate, -g, g) for g in gathered))
@@ -292,7 +262,7 @@ class RnsRing:
         commutes with `e ↦ k·e`); that the closed-form exponent table really
         is the pinned order's is re-derived from the host oracle in
         `ring_test`, not trusted."""
-        _require_domain("galois_eval", Eval, a)
+        require_domain("galois_eval", Eval, a)
         perm = self._galois_eval_perm(k)
         return Eval(tuple(fnp.take(limb, perm, axis=-1) for limb in a.limbs))
 
@@ -331,11 +301,11 @@ class RnsRing:
     def mul(self, a: Eval, b: Eval) -> Eval:
         """Pointwise — the ring's multiplication in the NTT domain *only*,
         which is what requiring `Eval` operands proves."""
-        _require_domain("mul", Eval, a, b)
+        require_domain("mul", Eval, a, b)
         return Eval(tuple(x * y for x, y in zip(a.limbs, b.limbs)))
 
     def mul_add(self, a: Eval, b: Eval, acc: Eval) -> Eval:
-        _require_domain("mul_add", Eval, a, b, acc)
+        require_domain("mul_add", Eval, a, b, acc)
         return Eval(tuple(x * y + z for x, y, z in zip(a.limbs, b.limbs, acc.limbs)))
 
     def stack(self, elements: Sequence[_E]) -> _E:
@@ -346,7 +316,7 @@ class RnsRing:
         matrices. Consumers assemble batches through this rather than
         re-deriving the limb transpose by hand.
         """
-        domain = _same_domain("stack", *elements)
+        domain = same_domain("stack", _DOMAINS, *elements)
         return domain(
             tuple(fnp.stack(list(limbs)) for limbs in zip(*(e.limbs for e in elements)))
         )
@@ -360,7 +330,7 @@ class RnsRing:
         pointwise, so it exists only in the NTT domain — which the operand
         types prove.
         """
-        _require_domain("matvec", Eval, mat, vec)
+        require_domain("matvec", Eval, mat, vec)
         # Limbs of one element share their leading axes, so limb 0 speaks for
         # all — and the guard states the contract itself (the contracted `k`
         # extent), not just the rank relation, because a size-1 axis would
@@ -386,13 +356,13 @@ class RnsRing:
 
     def mul_scalar(self, a: _E, s: int) -> _E:
         """Domain-generic: a scalar acts coefficient-wise in either domain."""
-        domain = _same_domain("mul_scalar", a)
+        domain = same_domain("mul_scalar", _DOMAINS, a)
         return domain(
             tuple(limb * self._scalar(s, i) for i, limb in enumerate(a.limbs))
         )
 
     def mul_scalar_then_sub(self, a: _E, s: int, acc: _E) -> _E:
-        domain = _same_domain("mul_scalar_then_sub", a, acc)
+        domain = same_domain("mul_scalar_then_sub", _DOMAINS, a, acc)
         return domain(
             tuple(
                 z - limb * self._scalar(s, i)
@@ -413,7 +383,7 @@ class RnsRing:
         notion, and a balanced lift of NTT-domain values is a bug wearing a
         plausible shape.
         """
-        _require_domain("to_balanced_limb0", Coeff, a)
+        require_domain("to_balanced_limb0", Coeff, a)
         q0 = self.q_moduli[0]
         row = [int(v) for v in np.asarray(a.limbs[0]).astype(object)]
         half = q0 >> 1
