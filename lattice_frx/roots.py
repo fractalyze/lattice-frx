@@ -143,8 +143,8 @@ def split_root(q: int) -> int:
     square root of `-1` modulo q, so `X^d + 1 ≡ (X^{d/2} - r)(X^{d/2} + r)`.
 
     The partial-split sibling of `primitive_root`: a per-modulus ring
-    constant computed once, below both the host and (future traced) split
-    rings rather than inside either. Only defined at primes
+    constant computed once, below both the traced and host split rings
+    rather than inside either. Only defined at primes
     `q ≡ 5 (mod 8)`. The two failure modes carry distinct messages on
     purpose: a non-prime is a caller bug anywhere, while `q ≡ 1 (mod 8)`
     usually means an NTT-friendly limb strayed into the partial-split
