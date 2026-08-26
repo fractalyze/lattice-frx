@@ -29,13 +29,18 @@ each module is here, and where the repo sits relative to the other
   every boundary check, and was still unusable by the second consumer,
   which silently reimplemented it instead. That failure mode is invisible
   to an import-graph check, so it has to be a review habit.
-- **The domain is a type, not a flag.** Traced ring ops take `Coeff` or
-  `Eval`, never bare limb tuples; `mul`/`mul_add`/`matvec` are `Eval`-only,
-  `to_balanced_limb0` is `Coeff`-only, and the embedding constructors are
-  named for the domain the caller asserts (`coeff_from_host` /
-  `eval_from_host`). Do not add a runtime `IsNTT`-style flag (lattigo's
-  move) — the domain is static at trace time and a flag branch splits the
-  trace for information the graph already has.
+- **The domain is a type, not a flag.** The container types and their two
+  guards live in `domains.py`: `Coeff` is shared by both rings, `Eval` is
+  the NTT ring's and `Split` the partial-split one's. Traced ring ops take
+  one of them, never bare limb tuples; `RnsRing.mul`/`mul_add`/`matvec`
+  are `Eval`-only, `SplitRing.mul` is `Split`-only, `to_balanced_limb0` is
+  `Coeff`-only, and the embedding constructors are named for the domain the
+  caller asserts (`coeff_from_host` / `eval_from_host` / `split_from_host`).
+  A ring passes its own pair to `same_domain`, so the other ring's domain is
+  refused at the guard rather than producing well-shaped nonsense. Do not
+  add a runtime `IsNTT`-style flag (lattigo's move) — the domain is static
+  at trace time and a flag branch splits the trace for information the
+  graph already has.
 - **No ring-element dtype, and the module layer is a shape convention.**
   The dtype boundary sits at the field (`zk_dtypes.prime_field`); a ring
   element is a typed tuple of per-limb `[..., d]` arrays, a module vector is
@@ -85,7 +90,8 @@ each module is here, and where the repo sits relative to the other
   belongs in an accelerated backend's boundary adapter, not here.
 - **Two ring modes, mutually exclusive moduli.** The NTT rings
   (`ring.py`/`host_ring.py`) need limbs `≡ 1 (mod 2d)`; the partial-split
-  ring (`split_ring.py`, the LNP line's mode) needs limbs `≡ 5 (mod 8)`,
+  rings (`split_ring.py`, both `SplitRing` and `HostSplitRing` — the LNP
+  line's mode) need limbs `≡ 5 (mod 8)`,
   and no prime is both. Never feed one family's primes to the other's
   ring — constructors guard it, and the guard's error names the other
   mode because a silent mix would surface as a consumer's soundness gap.

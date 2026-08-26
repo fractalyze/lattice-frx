@@ -42,8 +42,13 @@ small σ₋₁-invariant challenge differences stay invertible, which full
 splitting can never give. The two prime families are mutually exclusive
 (`q ≡ 1 (mod 2d)` forces `q ≡ 1 (mod 8)`), so the mode is chosen by the
 modulus and every constructor rejects the other family's primes loudly.
-Host oracle only for now; the traced split-domain ring is a tracked
-follow-up.
+It comes in the same traced/host pair the NTT ring does — `SplitRing`
+over per-limb field arrays and `HostSplitRing` over exact Python ints —
+and the traced one multiplies in a **`Split` domain**, the two-factor CRT
+view, where each half is a twisted convolution gathered out of a `2n-1`
+buffer. That is `d²/2` products against the coefficient domain's `d²`,
+and it composes into a `jit` zone; the module layer over it (`matvec`,
+`matmul`) is still host-only.
 
 The subtlety worth knowing before you use this: **the order an NTT emits
 its outputs in is implementation-defined** (bit-reversed vs natural). Two

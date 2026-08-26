@@ -107,3 +107,18 @@ py_test(
         "@lattice_frx_pip//numpy",
     ],
 )
+
+# The traced split ring against the host one, which is its oracle: schoolbook
+# convolution over exact ints versus a gathered twisted-circulant contraction.
+py_test(
+    name = "traced_split_ring_test",
+    size = "medium",
+    srcs = ["traced_split_ring_test.py"],
+    deps = [
+        "//lattice_frx",
+        requirement("absl-py"),
+        "@lattice_frx_pip//frx",
+        "@lattice_frx_pip//numpy",
+        "@lattice_frx_pip//zk_dtypes",
+    ],
+)

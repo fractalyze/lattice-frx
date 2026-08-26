@@ -1,4 +1,4 @@
-"""The partial-split host ring — `Z_q[X]/(X^d + 1)` at moduli `q ≡ 5 (mod 8)`.
+"""The partial-split ring — `Z_q[X]/(X^d + 1)` at moduli `q ≡ 5 (mod 8)`.
 
 The second modulus shape this substrate carries, and deliberately the
 opposite of `host_ring.py`'s: an NTT-friendly limb (`q ≡ 1 mod 2d`) splits
@@ -15,20 +15,27 @@ by challenge differences. One ring cannot have both — `q ≡ 1 (mod 2d)`
 forces `q ≡ 1 (mod 8)` for `d ≥ 4` — so this is a mode, not a parameter,
 and `roots.split_root` rejects a stray NTT-friendly limb loudly.
 
-Representation and contract are `host_ring.py`'s, shared through
-`_HostRingBase`: `(limbs, d)` `dtype=np.uint64` canonical arrays outside,
-exact Python ints inside. What this class adds:
+Two implementations, in the pairing `ring.py` and `host_ring.py` already
+have: **`SplitRing`** is the traced default a consumer computes with, and
+**`HostSplitRing`** is the slow obvious reference it is checked against.
+The host one is the better oracle here than usual, because its product is a
+schoolbook convolution over exact Python ints and shares no step with the
+CRT halves the traced one contracts.
+
+`HostSplitRing`'s representation and contract are `host_ring.py`'s, shared
+through `_HostRingBase`: `(limbs, d)` `dtype=np.uint64` canonical arrays
+outside, exact Python ints inside. What it adds over the base:
 
 - `mul` — coefficient-domain negacyclic **schoolbook convolution**. There
   is deliberately no CRT shortcut in it: the schoolbook product is the
-  modulus-shape-agnostic oracle that the split path below (and, later, the
-  traced twisted-convolution matvec) is checked against, the same
-  oracle-vs-accelerated structure the NTT ring has with `ring.py`.
+  modulus-shape-agnostic oracle that both the split path below and
+  `SplitRing`'s traced twisted convolution are checked against — the
+  same oracle-vs-accelerated structure the NTT ring has with `ring.py`.
 - `to_split` / `from_split` — the two-factor CRT view, an element as its
   residues modulo `X^{d/2} ∓ r`, shape `(limbs, 2, d/2)`. Half `0` is the
-  `X^{d/2} ≡ +r` residue, half `1` the `-r` one. This is the future traced
-  representation: each half's product is an `r`-twisted convolution, i.e.
-  a structured `d/2 × d/2` matvec.
+  `X^{d/2} ≡ +r` residue, half `1` the `-r` one. This is also the traced
+  ring's `Split` domain, and the wire between the two: each half's product
+  is an `r`-twisted convolution, i.e. a structured `d/2 × d/2` matvec.
 - `matmul` — the batched product, and the one path here that does not go
   through `mul`. It derives the same `X^d ≡ -1` fold as an anticirculant
   matrix rather than a convolution loop, shares no code with the CRT split,
@@ -39,15 +46,24 @@ exact Python ints inside. What this class adds:
   residue is nonzero. Cheap, host-side, and exactly the predicate the LNP
   challenge space needs pinned.
 
-There is no `ntt`/`intt` here on purpose, and no Eval domain: every
-operation is coefficient-domain. A consumer that wants device-shaped
-products waits for the split-domain traced ring; it does not get to borrow
-the NTT ring's, because the moduli are mutually exclusive.
+Neither ring has an `ntt`/`intt`, and neither has an `Eval` domain — the
+moduli that make this ring's challenge differences invertible are exactly
+the ones with no `2d`-th root of unity. A consumer that wants device-shaped
+products reaches `SplitRing` below; it does not get to borrow the NTT
+ring's transform, because the two modulus families are mutually exclusive.
 """
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any, TypeVar
+
+import frx.numpy as fnp
 import numpy as np
+import zk_dtypes
 from numpy.lib.stride_tricks import as_strided
 
 from lattice_frx.canonical import require_canonical
+from lattice_frx.domains import Coeff, Split, require_domain, same_domain
 from lattice_frx.host_ring import _HostRingBase
 from lattice_frx.roots import split_root
 
@@ -248,3 +264,283 @@ class HostSplitRing(_HostRingBase):
         challenge space consumes."""
         sp = self.to_split(a)
         return bool(sp.any(axis=2).all())
+
+
+_DOMAINS = (Coeff, Split)
+
+# Domain-generic ops take and return one domain, the same one; `mul` is not
+# among them, which is the point of having the two types.
+_S = TypeVar("_S", Coeff, Split)
+
+
+class SplitRing:
+    """The partial-split ring `Z_q[X]/(X^d + 1)` at `q ≡ 5 (mod 8)`, traced.
+
+    `HostSplitRing`'s traced counterpart, and the same pairing `ring.py` has
+    with `host_ring.py`: the unqualified name is the one a consumer computes
+    with and the one that composes into a `jit` zone, while the `host_` one is
+    the slow obvious reference it is checked against. The host ring earns that
+    role here twice over — it multiplies by schoolbook convolution over exact
+    Python ints, which shares no step with the CRT halves below.
+
+    ## Why the element is two types, and why neither is `Eval`
+
+    Same discipline as `ring.py`, one domain different. `Coeff` is shared —
+    coefficients mean the same thing in both rings — and this ring's second
+    domain is `Split`, the two-factor CRT view: an element as its residues
+    modulo `X^{d/2} ∓ r`, one `[..., 2, d/2]` field array per limb.
+
+    `Split` is emphatically *not* `Eval`. A fully-splitting modulus reduces
+    the ring to `d` copies of `F_q`, which is what makes the NTT ring's `mul`
+    pointwise. A partial-split modulus reduces it to two copies of
+    `F_q[X]/(X^{d/2} ∓ r)`, which are fields but not `F_q` — so the product
+    of two halves is still a convolution, just a twisted one of half the
+    degree. The domain buys structure and a 2x smaller product, not a free
+    one. That is the price of the invertibility LNP soundness extracts with
+    (eprint 2022/284, Lemma 2.6), and it is why this ring has no transform to
+    move between domains: `to_split` is `d/2` multiplies and `d` adds per
+    limb, not an NTT, so a consumer can cross per operation instead of
+    planning a domain schedule around the cost.
+
+    ## Why `mul` is a gather rather than a matrix
+
+    In `F_q[X]/(X^{d/2} - s)` the product is `T_s(u)·v` for the `s`-circulant
+    `T_s(u)[k][j] = u[(k-j) mod n]`, scaled by `s` where the index wraps. All
+    `n²` entries of `T_s(u)` are already present in the `2n-1` values
+    `[s·u[1] … s·u[n-1], u[0] … u[n-1]]`, so the matrix is one `take` from
+    that buffer and the twist costs `n-1` multiplies rather than `n²`. This
+    is the same Toeplitz observation `HostSplitRing._negacyclic` makes about
+    the anticirculant `Neg`, at `s = -1` and half the degree — but expressed
+    as a gather rather than a stride trick, because a traced backend has no
+    `as_strided` and a gather is what it would lower to anyway.
+
+    Both halves ride the same gather: the twists differ per half (`+r`, `-r`)
+    and enter through the buffer, so `mul` is one `take` and one contraction
+    over a `[..., 2, n, n]` operand, with every leading batch axis carried
+    through untouched.
+
+    ## What is not here
+
+    No `ntt`/`intt` — the moduli that make this ring invertible are exactly
+    the ones that have no `2d`-th root of unity.
+
+    No `to_balanced_limb0`, which `RnsRing` does carry. There it is a host
+    boundary op that materialises because a 50-bit balanced lift fits no
+    lane; here the same lift is already one `to_host` away from
+    `HostSplitRing`'s, so a second spelling would be a copy of a boundary
+    rather than a capability. Norms stay there for the same reason.
+
+    No module layer yet — `matvec`/`matmul`/`combine`/`galois` are still
+    `HostSplitRing`-only. The domain and the product are what a consumer
+    needs pinned first, since the module ops contract *through* `mul` and a
+    wrong twist would be inherited by all of them.
+    """
+
+    def __init__(self, q_moduli, d: int) -> None:
+        if d < 4 or d & (d - 1):
+            raise ValueError(
+                f"SplitRing: degree must be a power of two >= 4 to split, got {d!r}"
+            )
+        self.q_moduli: tuple[int, ...] = tuple(int(q) for q in q_moduli)
+        self.d = d
+        self.half = d // 2
+        # Rejects an NTT-friendly limb by naming the other mode — the two
+        # families are mutually exclusive and a silent mix is a soundness gap.
+        self.split_roots: tuple[int, ...] = tuple(split_root(q) for q in self.q_moduli)
+        self.fields = tuple(zk_dtypes.prime_field(q) for q in self.q_moduli)
+        # `T_s(u)[k][j] = w[n-1+k-j]` over the twisted buffer `w` — a
+        # trace-time constant, shared by both halves and every limb.
+        self._gather = np.array(
+            [[self.half - 1 + k - j for j in range(self.half)] for k in range(self.half)],
+            dtype=np.int32,
+        )
+        self._twist_cache: dict[int, np.ndarray] = {}
+
+    def _scalar(self, s: int, index: int) -> Any:
+        """A host integer as a field element of limb `index`."""
+        q, field = self.q_moduli[index], self.fields[index]
+        return fnp.asarray(np.array([int(s) % q], dtype=np.uint64).astype(field))[0]
+
+    def _twists(self, index: int) -> Any:
+        """Limb `index`'s two half-twists `(+r, -r)` as a `(2, 1)` column, so
+        one multiply twists both halves of a `[..., 2, n-1]` slice at once.
+
+        Only the **host** array is cached, and the conversion runs per call.
+        Caching the converted one instead is a tracer leak waiting to happen:
+        whichever call populates the cache first decides what is in it, so a
+        ring whose first `mul` is inside a `jit` would store that trace's
+        tracer and hand it to every later call, including eager ones. The
+        conversion is two elements and folds to a constant under `jit`, so
+        there is nothing to win by caching past it — which is why `ring.py`
+        caches numpy tables and never traced values either.
+        """
+        if index not in self._twist_cache:
+            q = self.q_moduli[index]
+            r = self.split_roots[index]
+            self._twist_cache[index] = np.array([[r % q], [(-r) % q]], dtype=np.uint64)
+        return fnp.asarray(self._twist_cache[index].astype(self.fields[index]))
+
+    def _tail(self, domain: type) -> tuple[int, ...]:
+        """The host-side trailing extents an element of `domain` occupies."""
+        return (2, self.half) if domain is Split else (self.d,)
+
+    def _limbs_from_host(self, arr: np.ndarray, op: str, domain: type):
+        """A host array as per-limb field arrays, batch axes moved inside.
+
+        The host convention puts a module stack's leading axes *in front* of
+        the limb axis (`(k, limbs, d)`), while a traced element carries them
+        inside each limb (`limbs × [k, d]`) — one array per limb is forced by
+        `prime_field` being per-modulus. So the boundary is a `moveaxis`, and
+        it is the only place that transposition happens.
+
+        The reduction runs in Python-int precision before the cast, because a
+        residue at these widths cannot be reduced after landing in a lane.
+        """
+        arr = np.asarray(arr)
+        tail = self._tail(domain)
+        limbs = len(self.q_moduli)
+        if arr.ndim < len(tail) + 1 or arr.shape[-len(tail) :] != tail:
+            raise ValueError(
+                f"SplitRing.{op}: expected a host array ending in "
+                f"(limbs, {', '.join(str(t) for t in tail)}) with limbs={limbs}, "
+                f"got shape {arr.shape!r}"
+            )
+        limb_axis = arr.ndim - 1 - len(tail)
+        if arr.shape[limb_axis] != limbs:
+            raise ValueError(
+                f"SplitRing.{op}: expected {limbs} limbs at axis {limb_axis}, "
+                f"got {arr.shape[limb_axis]}"
+            )
+        moved = np.moveaxis(arr, limb_axis, 0)
+        return tuple(
+            fnp.asarray(
+                np.array([int(v) % q for v in row.reshape(-1)], dtype=np.uint64)
+                .reshape(row.shape)
+                .astype(field)
+            )
+            for row, q, field in zip(moved, self.q_moduli, self.fields)
+        )
+
+    def coeff_from_host(self, arr: np.ndarray) -> Coeff:
+        """A host array as a coefficient-domain element.
+
+        The host contract carries no domain — a `(limbs, d)` array is just
+        bytes — so the caller asserts one by choosing this constructor.
+        """
+        return Coeff(self._limbs_from_host(arr, "coeff_from_host", Coeff))
+
+    def split_from_host(self, arr: np.ndarray) -> Split:
+        """A `HostSplitRing.to_split` array `(…, limbs, 2, d/2)` as a
+        CRT-domain element — the two rings' shared wire for this domain."""
+        return Split(self._limbs_from_host(arr, "split_from_host", Split))
+
+    def to_host(self, a: Coeff | Split) -> np.ndarray:
+        """An element back as the host contract — the boundary, not a traced op.
+
+        The domain does not survive the trip; what it decides is the shape,
+        `(…, limbs, d)` for `Coeff` and `(…, limbs, 2, d/2)` for `Split`,
+        which is what `HostSplitRing` and its `to_split` take respectively.
+        """
+        domain = same_domain("to_host", _DOMAINS, a)
+        # A field array converts one element at a time — `astype(np.uint64)`
+        # on the whole thing asks the dtype to infer a field from a scalar.
+        rows = []
+        for limb in a.limbs:
+            obj = np.asarray(limb).astype(object)
+            rows.append(
+                np.array([int(v) for v in obj.reshape(-1)], dtype=np.uint64).reshape(obj.shape)
+            )
+        stacked = np.stack(rows)
+        batch = stacked.ndim - 1 - len(self._tail(domain))
+        return np.moveaxis(stacked, 0, batch) if batch else stacked
+
+    def from_signed(self, values) -> Coeff:
+        """A signed integer coefficient vector, embedded per limb.
+
+        `Coeff` by construction: "small signed coefficients" is a
+        coefficient-domain notion.
+        """
+        row = [int(v) for v in values]
+        if len(row) != self.d:
+            raise ValueError(f"SplitRing.from_signed: expected {self.d} values, got {len(row)}")
+        return Coeff(
+            tuple(
+                fnp.asarray(np.array([v % q for v in row], dtype=np.uint64).astype(field))
+                for q, field in zip(self.q_moduli, self.fields)
+            )
+        )
+
+    def to_split(self, a: Coeff) -> Split:
+        """The two-factor CRT view: half `h` is `low + s·high` for `s = +r`
+        (h=0) / `-r` (h=1), which is `X^{d/2} ≡ s` substituted into the
+        element. `d` multiply-adds per limb — cheap enough that a consumer
+        can cross domains per operation rather than staying in one."""
+        require_domain("to_split", Coeff, a)
+        halves = []
+        for i, limb in enumerate(a.limbs):
+            r = self._scalar(self.split_roots[i], i)
+            low, high = limb[..., : self.half], limb[..., self.half :]
+            shifted = high * r
+            halves.append(fnp.stack([low + shifted, low - shifted], axis=-2))
+        return Split(tuple(halves))
+
+    def from_split(self, a: Split) -> Coeff:
+        """Inverse of `to_split`: `low = (u + v)/2`, `high = (u - v)/(2r)`,
+        both divisions exact modulo an odd prime."""
+        require_domain("from_split", Split, a)
+        rows = []
+        for i, limb in enumerate(a.limbs):
+            q = self.q_moduli[i]
+            inv2 = self._scalar(pow(2, -1, q), i)
+            inv2r = self._scalar(pow(2 * self.split_roots[i], -1, q), i)
+            u, v = limb[..., 0, :], limb[..., 1, :]
+            rows.append(fnp.concatenate([(u + v) * inv2, (u - v) * inv2r], axis=-1))
+        return Coeff(tuple(rows))
+
+    def mul(self, a: Split, b: Split) -> Split:
+        """The ring's multiplication, `Split`-only — which is what requiring
+        the domain proves.
+
+        Per limb: build the twisted buffer `[s·u[1:], u]`, read `T_s(u)` out
+        of it with one gather, and contract against `v`. Both halves ride the
+        same gather because the twist enters through the buffer, so this is
+        one `take` and one `[..., 2, n, n]` contraction — `d²/2` products
+        against the coefficient domain's `d²`, and every leading batch axis
+        rides through untouched.
+        """
+        require_domain("mul", Split, a, b)
+        halves = []
+        for i, (x, y) in enumerate(zip(a.limbs, b.limbs)):
+            buffer = fnp.concatenate([x[..., 1:] * self._twists(i), x], axis=-1)
+            twisted = fnp.take(buffer, self._gather, axis=-1)
+            halves.append((twisted * y[..., None, :]).sum(axis=-1))
+        return Split(tuple(halves))
+
+    def add(self, a: _S, b: _S) -> _S:
+        domain = same_domain("add", _DOMAINS, a, b)
+        return domain(tuple(x + y for x, y in zip(a.limbs, b.limbs)))
+
+    def sub(self, a: _S, b: _S) -> _S:
+        domain = same_domain("sub", _DOMAINS, a, b)
+        return domain(tuple(x - y for x, y in zip(a.limbs, b.limbs)))
+
+    def neg(self, a: _S) -> _S:
+        domain = same_domain("neg", _DOMAINS, a)
+        return domain(tuple(-x for x in a.limbs))
+
+    def mul_scalar(self, a: _S, s: int) -> _S:
+        """Domain-generic: a `Z_q` scalar acts entrywise in either domain —
+        `to_split` is linear, so scaling commutes with it."""
+        domain = same_domain("mul_scalar", _DOMAINS, a)
+        return domain(tuple(limb * self._scalar(s, i) for i, limb in enumerate(a.limbs)))
+
+    def stack(self, elements: Sequence[_S]) -> _S:
+        """A batch element from same-domain elements: limbs gain a leading axis.
+
+        The module convention's constructor, as in `ring.py` — stacking nests,
+        so a stack of stacks is a matrix.
+        """
+        domain = same_domain("stack", _DOMAINS, *elements)
+        return domain(
+            tuple(fnp.stack(list(limbs)) for limbs in zip(*(e.limbs for e in elements)))
+        )
