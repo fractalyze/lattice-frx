@@ -76,6 +76,15 @@ each module is here, and where the repo sits relative to the other
   transform is a breaking change, and the consumer's pin bump plus its
   cross-verification gates are the gate. Sequence it that way rather than
   merging a transform change and bumping later.
+- **An oracle spelled like the code's own fallback proves nothing.** This
+  repo is built out of oracle/accelerated pairs — `mul` against the CRT
+  split, `host_ring` against `ring`, `matmul`'s batched path against its
+  `matvec` fallback — and both sides of such a pair return identical bytes,
+  so agreement cannot say which ran. Write the oracle from a *different*
+  algorithm (fold per entry from `mul`; re-derive through `to_split`), never
+  by restating the production path's other branch, and check which branch
+  the test's operands actually take: a ring's own parameters decide that,
+  and the default is usually the slow one.
 - **The NTT's output order is part of its contract.** `HostRnsRing`
   reproduces lattigo's bit-reversed table order natively and applies no
   output permutation; `RnsRing` presents the same order with exactly one
