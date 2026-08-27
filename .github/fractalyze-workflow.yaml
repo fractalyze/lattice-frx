@@ -1,0 +1,38 @@
+# lattice-frx — board extensions for the fractalyze-plugins workflow.
+#
+# lattice-frx is a substrate library, so the board's primary axis is
+# neither a scheme (sig-frx) nor a primitive (hash-frx) — it is the module
+# the work lands in, which is how this package is split and how its work
+# decomposes. `Seam` covers the contract every other module sits on
+# (`canonical.py`); `NTT` is broken out from `Ring` because the transform
+# is the one part whose gate lives in the consumer, not here (see
+# CLAUDE.md). `none` catches infra / cross-cutting work. Two views:
+# Module lanes for day-to-day, Milestone rollup for week-over-week.
+#
+# Schema lives in `fractalyze/claude-plugins` (workflow plugin).
+
+board_extensions:
+  fields:
+    - name: Module
+      type: single_select
+      options: [Seam, Ring, NTT, RNS, Sampler, Primes, Infra, none]
+      derive_from_labels:
+        Seam: area:seam
+        Ring: area:ring
+        NTT: area:ntt
+        RNS: area:rns
+        Sampler: area:sampler
+        Primes: area:primes
+        Infra: area:infra
+        _fallback: none
+
+  views:
+    - name: Module kanban
+      type: board
+      group_by: Module
+      column_by: Status
+
+    - name: Milestone rollup
+      type: board
+      group_by: Milestone
+      column_by: Status
