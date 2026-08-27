@@ -7,3 +7,8 @@ __pycache__/
 bazel-*
 
 .venv/
+
+# Python build artifacts. Matches hash-frx / enc-frx / sig-frx.
+build/
+dist/
+.eggs/
