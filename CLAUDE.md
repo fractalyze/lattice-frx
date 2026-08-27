@@ -4,6 +4,14 @@ Read [README.md](README.md) first — it explains what this package is, why
 each module is here, and where the repo sits relative to the other
 `*-frx` repos. The rules below are the short imperative form of it.
 
+The rules every FRX repo shares — `@jit` placement, `for` vs `lax.scan`
+vs `vmap`, pytree registration, what host is allowed to mean — are not
+restated here. They follow from FRX and XLA semantics rather than from
+what this package computes, and the playbook injects them at session
+start as
+[`conventions/frx.md`](https://github.com/fractalyze/claude-plugins/blob/main/plugins/playbook/conventions/frx.md).
+What follows is what is specific to a traced ring.
+
 - **No dependency on a scheme repo. Ever.** This package sits *below*
   enc-frx and sig-frx, which already carry ML-KEM and ML-DSA; depending on
   either would make their own adoption of this substrate circular. Same for
