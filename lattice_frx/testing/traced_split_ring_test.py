@@ -45,7 +45,7 @@ def _random_canonical(rng, *lead: int) -> np.ndarray:
     return HostSplitRing(_Q_MODULI, _D).uniform_stack(rng, *lead)
 
 
-def _host_split_stack(host, arrays: np.ndarray) -> np.ndarray:
+def host_split_stack(host, arrays: np.ndarray) -> np.ndarray:
     """`HostSplitRing.to_split` applied over a stack.
 
     The host view is rank-one — its `_coerce` refuses a batched array, where
@@ -69,6 +69,16 @@ def _host_scalars(per_limb) -> np.ndarray:
     would leave the oracle on the old spelling the day it changes.
     """
     return np.stack(limbs_to_host(per_limb), axis=-1)
+
+
+def _split(ring, arr: np.ndarray):
+    """A host array as a `Split` element — the domain the module layer takes."""
+    return ring.to_split(ring.coeff_from_host(arr))
+
+
+def _from_split(ring, element) -> np.ndarray:
+    """A `Split` result back as the host contract, for comparison."""
+    return ring.to_host(ring.from_split(element))
 
 
 def _traced_product(ring, a: np.ndarray, b: np.ndarray, mul=None) -> np.ndarray:
@@ -157,7 +167,7 @@ class TracedSplitRingHostBoundaryTest(parameterized.TestCase):
     def test_the_split_host_round_trip_preserves_shape_and_bytes(self, lead):
         ring, host = _rings()
         arr = _random_canonical(np.random.default_rng(2), *lead)
-        wire = _host_split_stack(host, arr)
+        wire = host_split_stack(host, arr)
         got = ring.to_host(ring.split_from_host(wire))
         self.assertEqual(got.shape, lead + (len(_Q_MODULI), 2, _D // 2))
         np.testing.assert_array_equal(got, wire)
@@ -322,7 +332,7 @@ class TracedSplitRingConstructorTest(parameterized.TestCase):
         ring, host = _rings()
         np.testing.assert_array_equal(
             ring.to_host(ring.zeros(Split, *lead)),
-            _host_split_stack(host, host.zeros(*lead)),
+            host_split_stack(host, host.zeros(*lead)),
         )
 
     def test_the_empty_stack_survives_the_host_boundary(self):
@@ -444,6 +454,199 @@ class TracedSplitRingConstructorTest(parameterized.TestCase):
         self.assertIsInstance(got, Coeff)
 
 
+
+class TracedSplitRingModuleTest(parameterized.TestCase):
+    """The module layer: `matvec`/`matmul`/`scale` over `Split`, `combine`
+    over either domain, `galois` over `Coeff`.
+
+    `Split`-only for the three that carry the product, because that is where
+    this ring's multiplication is defined — the same rule `RnsRing`'s
+    `Eval`-only `matvec` states for the sibling ring. Each is pinned against
+    `HostSplitRing`, which reaches the same answer by schoolbook convolution
+    over exact Python ints and shares no step with the CRT contraction.
+    """
+
+    @parameterized.named_parameters(("single", ()), ("batched", (2,)))
+    def test_matvec_matches_the_host(self, lead):
+        ring, host = _rings()
+        rng = np.random.default_rng(50)
+        m, k = 3, 2
+        mat = _random_canonical(rng, *lead, m, k)
+        vec = _random_canonical(rng, *lead, k)
+        got = _from_split(ring, ring.matvec(_split(ring, mat), _split(ring, vec)))
+        if lead:
+            want = np.stack([host.matvec(mat[i], vec[i]) for i in range(lead[0])])
+        else:
+            want = host.matvec(mat, vec)
+        np.testing.assert_array_equal(got, want)
+
+    def test_matvec_contracts_nothing_into_the_empty_stack(self):
+        """No rows is a real statement — an opening with no linear relations
+        attached — so it is the empty stack, not an error."""
+        ring, _ = _rings()
+        rng = np.random.default_rng(51)
+        mat = _random_canonical(rng, 0, 2)
+        vec = _random_canonical(rng, 2)
+        got = ring.matvec(_split(ring, mat), _split(ring, vec))
+        self.assertEqual(ring.to_host(got).shape, (0, len(_Q_MODULI), 2, _D // 2))
+
+    def test_matvec_refuses_a_k_extent_that_does_not_contract(self):
+        ring, _ = _rings()
+        rng = np.random.default_rng(52)
+        mat = _split(ring, _random_canonical(rng, 3, 2))
+        vec = _split(ring, _random_canonical(rng, 3))
+        with self.assertRaisesRegex(ValueError, r"matvec"):
+            ring.matvec(mat, vec)
+
+    def test_matvec_refuses_a_vector_of_the_matrix_rank(self):
+        """A rank check alone would pass a `(k,)` vector given as `(1, k)`,
+        so the guard states the contracted extent, not just the ranks."""
+        ring, _ = _rings()
+        rng = np.random.default_rng(53)
+        mat = _split(ring, _random_canonical(rng, 3, 2))
+        with self.assertRaisesRegex(ValueError, r"matvec"):
+            ring.matvec(mat, mat)
+
+    @parameterized.named_parameters(("coefficients", "coeff"), ("mixed", "mixed"))
+    def test_matvec_refuses_the_wrong_domain(self, kind):
+        ring, _ = _rings()
+        rng = np.random.default_rng(54)
+        mat_c = ring.coeff_from_host(_random_canonical(rng, 3, 2))
+        vec_c = ring.coeff_from_host(_random_canonical(rng, 2))
+        args = (mat_c, vec_c) if kind == "coeff" else (ring.to_split(mat_c), vec_c)
+        with self.assertRaisesRegex(TypeError, r"matvec"):
+            ring.matvec(*args)
+
+    @parameterized.named_parameters(("one_column", 1), ("several", 3))
+    def test_matmul_matches_the_host(self, w):
+        ring, host = _rings()
+        rng = np.random.default_rng(55)
+        m, k = 3, 2
+        mat = _random_canonical(rng, m, k)
+        other = _random_canonical(rng, k, w)
+        got = _from_split(ring, ring.matmul(_split(ring, mat), _split(ring, other)))
+        np.testing.assert_array_equal(got, host.matmul(mat, other))
+
+    def test_matmul_at_one_column_is_matvec(self):
+        """The relationship `HostSplitRing.matmul`'s docstring states —
+        `matmul(A, v[:, None])[:, 0]` — holds here too, because both go
+        through one contraction rather than two spellings of it."""
+        ring, _ = _rings()
+        rng = np.random.default_rng(56)
+        mat = _split(ring, _random_canonical(rng, 4, 2))
+        vec_host = _random_canonical(rng, 2)
+        vec = _split(ring, vec_host)
+        column = _split(ring, vec_host[:, None])
+        np.testing.assert_array_equal(
+            _from_split(ring, ring.matvec(mat, vec)),
+            _from_split(ring, ring.matmul(mat, column))[:, 0],
+        )
+
+    def test_matmul_refuses_an_inner_extent_that_does_not_contract(self):
+        ring, _ = _rings()
+        rng = np.random.default_rng(57)
+        mat = _split(ring, _random_canonical(rng, 3, 2))
+        other = _split(ring, _random_canonical(rng, 3, 2))
+        with self.assertRaisesRegex(ValueError, r"matmul"):
+            ring.matmul(mat, other)
+
+    def test_scale_matches_the_host(self):
+        ring, host = _rings()
+        rng = np.random.default_rng(58)
+        element = _random_canonical(rng)
+        stack = _random_canonical(rng, 4)
+        got = _from_split(ring, ring.scale(_split(ring, element), _split(ring, stack)))
+        np.testing.assert_array_equal(got, host.scale(element, stack))
+
+    def test_scale_refuses_a_stack_that_is_not_one(self):
+        """`mul` would broadcast these into a well-shaped answer to a
+        question nobody asked, which is the whole reason `scale` is named."""
+        ring, _ = _rings()
+        rng = np.random.default_rng(59)
+        element = _split(ring, _random_canonical(rng))
+        with self.assertRaisesRegex(ValueError, r"scale"):
+            ring.scale(element, element)
+
+    @parameterized.named_parameters(("one_sum", 1), ("a_batch", 3))
+    def test_combine_matches_the_host(self, rows):
+        ring, host = _rings()
+        rng = np.random.default_rng(60)
+        terms = 4
+        stack = _random_canonical(rng, terms, 2)
+        weights = rng.integers(0, _Q_MODULI[0], size=(rows, terms))
+        flat = weights[0] if rows == 1 else weights
+        got = ring.combine(flat, _split(ring, stack))
+        np.testing.assert_array_equal(_from_split(ring, got), host.combine(flat, stack))
+
+    def test_combine_is_domain_generic(self):
+        """A `Z_q` scalar acts entrywise in either domain, so the answer does
+        not depend on which side of `to_split` the aggregation happens."""
+        ring, _ = _rings()
+        rng = np.random.default_rng(61)
+        stack = ring.coeff_from_host(_random_canonical(rng, 3))
+        weights = rng.integers(0, _Q_MODULI[0], size=3)
+        np.testing.assert_array_equal(
+            ring.to_host(ring.to_split(ring.combine(weights, stack))),
+            ring.to_host(ring.combine(weights, ring.to_split(stack))),
+        )
+
+    def test_combine_refuses_a_weight_count_the_stack_does_not_match(self):
+        ring, _ = _rings()
+        rng = np.random.default_rng(62)
+        stack = _split(ring, _random_canonical(rng, 3))
+        with self.assertRaisesRegex(ValueError, r"combine"):
+            ring.combine(np.arange(4), stack)
+
+    def test_combine_refuses_weights_above_rank_two(self):
+        ring, _ = _rings()
+        rng = np.random.default_rng(63)
+        stack = _split(ring, _random_canonical(rng, 3))
+        with self.assertRaisesRegex(ValueError, r"combine"):
+            ring.combine(np.zeros((2, 2, 3), dtype=np.int64), stack)
+
+    @parameterized.parameters(1, 3, 5, -1)
+    def test_galois_matches_the_host(self, k):
+        ring, host = _rings()
+        arr = _random_canonical(np.random.default_rng(64))
+        got = ring.galois(ring.coeff_from_host(arr), k)
+        np.testing.assert_array_equal(ring.to_host(got), host.galois(arr, k))
+
+    def test_galois_carries_batch_axes(self):
+        """σ_k of a module vector is σ_k of each element — a consumer lifting
+        a whole vector through an automorphism should not spell that loop."""
+        ring, host = _rings()
+        arr = _random_canonical(np.random.default_rng(65), 3)
+        got = ring.galois(ring.coeff_from_host(arr), 3)
+        np.testing.assert_array_equal(ring.to_host(got), host.galois(arr, 3))
+
+    @parameterized.parameters(2, 0, 2 * _D)
+    def test_galois_refuses_an_even_exponent(self, k):
+        """`gcd(k, 2d) = 1` is what makes σ_k an automorphism, and `2d` is a
+        power of two — so an even `k` is a projection, not a ring map."""
+        ring, _ = _rings()
+        element = ring.coeff_from_host(_random_canonical(np.random.default_rng(67)))
+        with self.assertRaisesRegex(ValueError, r"k must be odd"):
+            ring.galois(element, k)
+
+    @parameterized.parameters((3, 3 + 2 * _D), (-1, 2 * _D - 1))
+    def test_galois_reads_the_exponent_modulo_two_d(self, k, equivalent):
+        """σ_k depends on `k mod 2d` only, so the two spellings are one map."""
+        ring, _ = _rings()
+        element = ring.coeff_from_host(_random_canonical(np.random.default_rng(68)))
+        np.testing.assert_array_equal(
+            ring.to_host(ring.galois(element, k)),
+            ring.to_host(ring.galois(element, equivalent)),
+        )
+
+    def test_galois_refuses_the_split_domain(self):
+        """σ_k permutes coefficients; a CRT half has none to permute, and the
+        automorphism does not act half-wise anyway."""
+        ring, _ = _rings()
+        split = _split(ring, _random_canonical(np.random.default_rng(66)))
+        with self.assertRaisesRegex(TypeError, r"galois"):
+            ring.galois(split, 3)
+
+
 class TracedSplitRingTracingTest(parameterized.TestCase):
     """The reason this ring exists beside the host one."""
 
@@ -490,7 +693,37 @@ class TracedSplitRingTracingTest(parameterized.TestCase):
             return ring.mul(ring.to_split(x), ring.zeros(Split))
 
         got = ring.to_host(frx.vmap(annihilate)(ring.coeff_from_host(arr)))
-        np.testing.assert_array_equal(got, _host_split_stack(host, host.zeros(k)))
+        np.testing.assert_array_equal(got, host_split_stack(host, host.zeros(k)))
+
+    def test_the_module_layer_holds_under_jit_and_vmap(self):
+        ring, host = _rings()
+        rng = np.random.default_rng(70)
+        b, m, k = 2, 3, 2
+        mat, vec = _random_canonical(rng, b, m, k), _random_canonical(rng, b, k)
+        want = np.stack([host.matvec(mat[i], vec[i]) for i in range(b)])
+        jitted = frx.jit(ring.matvec)
+        np.testing.assert_array_equal(
+            _from_split(ring, jitted(_split(ring, mat), _split(ring, vec))), want
+        )
+        mapped = frx.vmap(ring.matvec)
+        np.testing.assert_array_equal(
+            _from_split(ring, mapped(_split(ring, mat), _split(ring, vec))), want
+        )
+
+    def test_a_whole_module_contraction_composes_into_one_jit_zone(self):
+        """The shape a consumer's proof layer wants: host arrays at the edges
+        and no boundary crossing anywhere inside."""
+        ring, host = _rings()
+        rng = np.random.default_rng(71)
+        mat, vec = _random_canonical(rng, 3, 2), _random_canonical(rng, 2)
+
+        def contract(a, v):
+            return ring.from_split(ring.matvec(ring.to_split(a), ring.to_split(v)))
+
+        got = ring.to_host(
+            frx.jit(contract)(ring.coeff_from_host(mat), ring.coeff_from_host(vec))
+        )
+        np.testing.assert_array_equal(got, host.matvec(mat, vec))
 
     def test_a_ring_survives_being_traced_first(self):
         """The ring caches trace-time constants, and the call that fills the
