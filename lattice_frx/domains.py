@@ -67,6 +67,27 @@ def require_domain(op: str, domain: type, *values) -> None:
             )
 
 
+def require_domain_type(op: str, allowed: tuple[type, ...], domain: type) -> type:
+    """One of `allowed` as a *type* rather than as a value, or a `TypeError`.
+
+    The third member of this family, and the one an op reaches for when it has
+    no operand to read a domain off. A constructor is the case: zero is the
+    same element in every domain, so `zeros` has to be *told* which one it is
+    building, and the thing it is told is a type.
+
+    Here rather than in a ring for the reason the module docstring gives — a
+    ring that open-codes `domain not in allowed` is a second copy of
+    `same_domain`'s own membership test, and the copy is what drifts.
+    """
+    if domain not in allowed:
+        raise TypeError(
+            f"{op}: expected one of "
+            + ", ".join(d.__name__ for d in allowed)
+            + f", got {domain!r}"
+        )
+    return domain
+
+
 def same_domain(op: str, allowed: tuple[type, ...], *values) -> type:
     """The shared domain of `values`, or a `TypeError` naming the mismatch.
 

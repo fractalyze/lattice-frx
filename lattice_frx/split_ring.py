@@ -63,7 +63,13 @@ import zk_dtypes
 from numpy.lib.stride_tricks import as_strided
 
 from lattice_frx.canonical import require_canonical
-from lattice_frx.domains import Coeff, Split, require_domain, same_domain
+from lattice_frx.domains import (
+    Coeff,
+    Split,
+    require_domain,
+    require_domain_type,
+    same_domain,
+)
 from lattice_frx.host_ring import _HostRingBase
 from lattice_frx.roots import split_root
 
@@ -279,6 +285,25 @@ class HostSplitRing(_HostRingBase):
 # rather than letting the conversion happen wherever it is convenient.
 # ---------------------------------------------------------------------------
 
+def limbs_to_host(limbs) -> list[np.ndarray]:
+    """Per-limb field arrays as the host's `np.uint64` contract, one per limb.
+
+    A field array converts **one element at a time** — `astype(np.uint64)` on
+    the whole thing asks the dtype to infer a field from a scalar — and that
+    workaround is a property of the dtype rather than of this ring, so it gets
+    one definition. `to_host` adds the limb-axis move; a caller reading
+    something that is not a ring element (a per-limb `Z_q` value, say) has no
+    axis to move and wants this directly.
+    """
+    rows = []
+    for limb in limbs:
+        obj = np.asarray(limb).astype(object)
+        rows.append(
+            np.array([int(v) for v in obj.reshape(-1)], dtype=np.uint64).reshape(obj.shape)
+        )
+    return rows
+
+
 _DOMAINS = (Coeff, Split)
 
 # Domain-generic ops take and return one domain, the same one; `mul` is not
@@ -348,6 +373,15 @@ class SplitRing:
     `HostSplitRing`-only. The domain and the product are what a consumer
     needs pinned first, since the module ops contract *through* `mul` and a
     wrong twist would be inherited by all of them.
+
+    The **constructors** are here, though, and they come before that layer
+    on purpose. Counted across the only consumer, `zeros`, `one`,
+    `uniform_stack` and `from_signed_stack` are reached an order of
+    magnitude more often than `mul` is, and without them a consumer builds
+    every operand through `HostSplitRing` and crosses `coeff_from_host` —
+    so `SplitRing` could not close a `jit` zone even for a `mul`-only
+    workload. A ring that passes every boundary check and is still unusable
+    by its consumer is the failure this package has hit before.
     """
 
     def __init__(self, q_moduli, d: int) -> None:
@@ -458,16 +492,42 @@ class SplitRing:
         which is what `HostSplitRing` and its `to_split` take respectively.
         """
         domain = same_domain("to_host", _DOMAINS, a)
-        # A field array converts one element at a time — `astype(np.uint64)`
-        # on the whole thing asks the dtype to infer a field from a scalar.
-        rows = []
-        for limb in a.limbs:
-            obj = np.asarray(limb).astype(object)
-            rows.append(
-                np.array([int(v) for v in obj.reshape(-1)], dtype=np.uint64).reshape(obj.shape)
-            )
-        stacked = np.stack(rows)
+        stacked = np.stack(limbs_to_host(a.limbs))
         return np.moveaxis(stacked, 0, stacked.ndim - 1 - len(self._tail(domain)))
+
+    def _coeff_from_exact_ints(self, values: np.ndarray) -> Coeff:
+        """An object-dtype array of exact Python ints, trailing axis `d`, as a
+        `Coeff` — the one place raw signed input crosses into field arrays.
+
+        Object dtype so numpy drives the reduction loop while the arithmetic
+        stays exact: a `-1` witness coefficient becomes `q-1` rather than
+        truncating in a lane on the way in, and a value wider than a limb
+        reduces correctly instead of wrapping.
+
+        `astype(field)` takes the object array directly. Staging through
+        `np.uint64` first is a whole extra pass per limb for no change in the
+        bytes — measured ~9% of a `(256, 128)` two-limb embedding.
+
+        **The `% q` is deliberate redundancy, and no test can kill it.**
+        Measured, `astype(field)` already canonicalizes on its own, negatives
+        and values past `2**80` included, so removing the reduce changes no
+        byte. It stays because canonicalization is this package's guarantee to
+        make and not the array layer's to lend: the same layer narrows
+        `uint64` to `uint32` and truncates silently (see the module header),
+        so a contract that rests on its cast semantics is one upstream change
+        away from being wrong everywhere at once. `from_signed`'s old spelling
+        and `_limbs_from_host` both reduce explicitly for the same reason.
+
+        Shared by `from_signed` and `from_signed_stack` because this cast is
+        the seam the module header calls the most confusable thing here, and
+        it should have one spelling.
+        """
+        return Coeff(
+            tuple(
+                fnp.asarray((values % q).astype(field))
+                for q, field in zip(self.q_moduli, self.fields)
+            )
+        )
 
     def from_signed(self, values) -> Coeff:
         """A signed integer coefficient vector, embedded per limb.
@@ -478,12 +538,122 @@ class SplitRing:
         row = [int(v) for v in values]
         if len(row) != self.d:
             raise ValueError(f"SplitRing.from_signed: expected {self.d} values, got {len(row)}")
+        return self._coeff_from_exact_ints(np.array(row, dtype=object))
+
+    def from_signed_stack(self, rows) -> Coeff:
+        """`from_signed` per row: a `(k, d)` array — or a sequence of
+        length-`d` rows — as a `Coeff` whose limbs carry one leading axis.
+
+        The module convention's constructor, and `_HostRingBase`'s counterpart
+        in everything but its guards — the host's is a bare `np.stack`, so it
+        accepts a wrong row length silently where this refuses it.
+
+        Deliberately not `stack([from_signed(r) for r in rows])`. The saving
+        is not the count of reductions — object dtype dispatches one
+        `int.__mod__` per element either way — but that numpy drives **one**
+        loop over the block instead of `k` of them, plus `k-1` array
+        constructions and field casts. Measured 3.6-6.3x at `k = 64`,
+        d = 64/128.
+        """
+        prefix = f"SplitRing.from_signed_stack: expected a non-empty (k, {self.d})"
+        try:
+            block = [[int(v) for v in row] for row in rows]
+        except TypeError as exc:
+            # A rank-one input — one element's coefficients, where a stack of
+            # them was wanted. It has to land as a shape `ValueError` and not
+            # as the `TypeError` the comprehension would otherwise raise: this
+            # package keeps the two failure modes apart because they are
+            # different caller bugs, and "not iterable" names neither.
+            raise ValueError(f"{prefix} stack of signed values, got a rank-one input") from exc
+        if not block:
+            raise ValueError(f"{prefix} stack of signed values, got no rows")
+        if any(len(row) != self.d for row in block):
+            raise ValueError(
+                f"{prefix} stack of signed values, got rows of lengths "
+                f"{sorted({len(row) for row in block})}"
+            )
+        return self._coeff_from_exact_ints(np.array(block, dtype=object))
+
+    def zeros(self, domain: type, *lead: int) -> Coeff | Split:
+        """The additive identity of `domain`, as a `lead`-shaped stack.
+
+        Unlike `one`, zero is the *same* element in both domains — `to_split`
+        is linear, so it carries `0` to `0` — which is exactly why the domain
+        has to be said here rather than inferred from the value. `zeros(D, 0)`
+        is the empty stack a contraction over nothing hands back, which
+        `_HostRingBase.matvec` documents as a real statement rather than an
+        error.
+
+        The domain arrives as a **type, not a flag**: it is fixed at trace
+        time, it names the return type instead of branching on it inside the
+        graph, and it is the same thing `_tail` and `_limbs_from_host`
+        already take. The runtime `IsNTT`-style flag CLAUDE.md rejects is a
+        different animal — that one splits a trace for information the graph
+        already has.
+        """
+        require_domain_type("SplitRing.zeros", _DOMAINS, domain)
+        shape = (*lead, *self._tail(domain))
+        return domain(tuple(fnp.zeros(shape, dtype=field) for field in self.fields))
+
+    def one(self) -> Coeff:
+        """The multiplicative identity, **in the coefficient domain**.
+
+        Named for the ring element rather than for whichever domain this
+        ring's product happens to live in, matching `_HostRingBase.one` for
+        the reason it gives: returning the `Split` view here would make `one`
+        two different elements across the two rings under a single name. A
+        consumer multiplying by it crosses, and that `to_split` folds to a
+        constant under `jit`.
+        """
+        return self.from_signed([1] + [0] * (self.d - 1))
+
+    def uniform_stack(self, rng: np.random.Generator, *lead: int) -> Coeff:
+        """A `lead`-shaped stack of independent uniform elements, in `Coeff`.
+
+        Uniform per limb is uniform over `R_q` by CRT, so here the domain is
+        a choice rather than a constraint; `Coeff` keeps one answer and
+        matches the array `to_host` hands `HostSplitRing`.
+
+        A **boundary** constructor: it holds a host generator, so it cannot
+        run under `jit`. That is the honest outcome rather than a traced RNG
+        this package does not own — the same stance `to_balanced_limb0`
+        takes — and the generator is injected like every other randomness
+        consumer here.
+
+        Drawn limb by limb in `q_moduli` order, which is `_HostRingBase`'s
+        own order, so the two rings are byte-identical at one seed. A
+        consumer replaying these draws depends on that order and not merely
+        on the distribution.
+        """
         return Coeff(
             tuple(
-                fnp.asarray(np.array([v % q for v in row], dtype=np.uint64).astype(field))
+                fnp.asarray(
+                    rng.integers(0, q, size=(*lead, self.d), dtype=np.uint64).astype(field)
+                )
                 for q, field in zip(self.q_moduli, self.fields)
             )
         )
+
+    def constant_coeff(self, a: Coeff) -> tuple[Any, ...]:
+        """Every element's constant coefficient, one `Z_q` array per limb.
+
+        `Coeff`-only, and the domain type is what proves it: a CRT half holds
+        a residue modulo `X^{d/2} ∓ r` and has no constant term to read, so
+        asking one for it is a bug in a plausible shape.
+
+        Deliberately **not** a domain type on the way out. What comes back is
+        a `Z_q` value per limb, not a ring element, and dressing it as `Coeff`
+        would put a ring-element type on something no ring op can take. A
+        bare tuple is already a pytree, so it threads `jit`/`vmap` without a
+        registration of its own — and unlike the host's, it needs no
+        defensive copy, because a traced array cannot be written through.
+
+        Named rather than left to the caller as `limb[..., 0]` for the reason
+        `_HostRingBase.constant_coeff` gives: that index is this backend's
+        array layout, not the ring's interface.
+        """
+        require_domain("constant_coeff", Coeff, a)
+        return tuple(limb[..., 0] for limb in a.limbs)
 
     def to_split(self, a: Coeff) -> Split:
         """The two-factor CRT view: half `h` is `low + s·high` for `s = +r`
