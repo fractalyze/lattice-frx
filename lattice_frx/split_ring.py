@@ -71,7 +71,7 @@ from lattice_frx.domains import (
     same_domain,
 )
 from lattice_frx.host_ring import _HostRingBase
-from lattice_frx.roots import split_root
+from lattice_frx.roots import galois_gather_table, split_root
 
 
 class HostSplitRing(_HostRingBase):
@@ -306,6 +306,11 @@ def limbs_to_host(limbs) -> list[np.ndarray]:
 
 _DOMAINS = (Coeff, Split)
 
+# A module stack's contracted axis, counted from the end: an operand is
+# `[..., k, *tail]` and `Split`'s tail is `(2, d/2)`. Named because three ops
+# index by it and an off-by-one here is a shape error several calls away.
+_K_AXIS = -3
+
 # Domain-generic ops take and return one domain, the same one; `mul` is not
 # among them, which is the point of having the two types.
 _S = TypeVar("_S", Coeff, Split)
@@ -369,13 +374,33 @@ class SplitRing:
     `HostSplitRing`'s, so a second spelling would be a copy of a boundary
     rather than a capability. Norms stay there for the same reason.
 
-    No module layer yet — `matvec`/`matmul`/`combine`/`galois` are still
-    `HostSplitRing`-only. The domain and the product are what a consumer
-    needs pinned first, since the module ops contract *through* `mul` and a
-    wrong twist would be inherited by all of them.
+    ## The module layer, and why it is not a loop of `mul`
 
-    The **constructors** are here, though, and they come before that layer
-    on purpose. Counted across the only consumer, `zeros`, `one`,
+    `matvec`/`matmul`/`scale` are `Split`-only like `mul`, because they are
+    where the product happens; `combine` weights by plain `Z_q` scalars and
+    so is domain-generic; `galois` is `Coeff`-only, since σ_k permutes
+    coefficients and a CRT half has none.
+
+    All of them contract through one gather. `T_s(u)` is built from the
+    **left** operand, so contracting a matrix against `w` columns by calling
+    `mul` per column would rebuild the same buffer `w` times — the waste
+    `HostSplitRing.matmul` avoids by building `Neg` once and reusing it down
+    every column, worth 112-116x there. `_contract` is that shape: gather the
+    left operand once, reduce against each right-hand column.
+
+    Measured (CPU, warm `jit`, `(256, 3) x (3, 16)` at d=128), against the
+    two spellings it was chosen over: 73 ms here, 115 ms for one wide
+    broadcast, 87 ms for a batched `dot_general` per half. The broadcast
+    loses because it materialises `[m, w, k, 2, n, n]` — 100M elements per
+    limb at that shape — where reducing per column holds `m·k·2·n²` however
+    wide the right operand is. `dot_general` loses for the reason recorded
+    against `einsum` here: its operands cannot be fused into, so writing the
+    contraction as a dot *forces* the materialisation rather than avoiding
+    it. `matvec` has no `w` axis and so is one such column.
+
+    ## The constructors, and why they came first
+
+    Counted across the only consumer, `zeros`, `one`,
     `uniform_stack` and `from_signed_stack` are reached an order of
     magnitude more often than `mul` is, and without them a consumer builds
     every operand through `HostSplitRing` and crosses `coeff_from_host` —
@@ -411,6 +436,23 @@ class SplitRing:
         """A host integer as a field element of limb `index`."""
         q, field = self.q_moduli[index], self.fields[index]
         return fnp.asarray(np.array([int(s) % q], dtype=np.uint64).astype(field))[0]
+
+    def _scalars(self, values: np.ndarray, index: int) -> Any:
+        """A host integer array as field elements of limb `index` — `_scalar`
+        for more than one of them.
+
+        One `index` decides both the modulus and the field, which is the
+        point: taking them separately makes "reduce by one limb, cast to
+        another" a spelling that exists, and it is a mistake no test can see
+        because the cast reduces again on its way in.
+
+        That re-reduction is also why the `% q` here changes no byte; it stays
+        for the reason `_coeff_from_exact_ints` documents at length —
+        canonicalisation is this package's guarantee to make rather than the
+        array layer's to lend.
+        """
+        q, field = self.q_moduli[index], self.fields[index]
+        return fnp.asarray((np.asarray(values, dtype=object) % q).astype(field))
 
     def _twists(self, index: int) -> Any:
         """Limb `index`'s two half-twists `(+r, -r)` as a `(2, 1)` column, so
@@ -703,12 +745,40 @@ class SplitRing:
         wants that same shape: gather the left operand once, contract wide.
         """
         require_domain("mul", Split, a, b)
-        halves = []
-        for i, (x, y) in enumerate(zip(a.limbs, b.limbs)):
-            buffer = fnp.concatenate([x[..., 1:] * self._twists(i), x], axis=-1)
-            twisted = fnp.take(buffer, self._gather, axis=-1)
-            halves.append((twisted * y[..., None, :]).sum(axis=-1))
-        return Split(tuple(halves))
+        return Split(
+            tuple(
+                self._contract(self._gathered(x, i), y)
+                for i, (x, y) in enumerate(zip(a.limbs, b.limbs))
+            )
+        )
+
+    def _gathered(self, limb, index: int):
+        """`T_s(u)` for every element of one limb: `[..., 2, n, n]`.
+
+        The `s`-circulant is Toeplitz, so all `n²` entries already sit in the
+        `2n-1` values `[s·u[1] … s·u[n-1], u[0] … u[n-1]]` and the matrix is
+        one `take` out of that buffer — the twist costing `n-1` multiplies
+        rather than `n²`. Both halves ride the same gather because the twist
+        enters through the buffer.
+
+        Split out because it is the expensive half of every product here, and
+        the module layer's whole reason for existing is to build it **once**
+        and reduce against it repeatedly.
+        """
+        buffer = fnp.concatenate([limb[..., 1:] * self._twists(index), limb], axis=-1)
+        return fnp.take(buffer, self._gather, axis=-1)
+
+    @staticmethod
+    def _contract(gathered, vec):
+        """One gathered left operand against one right-hand column.
+
+        `gathered` is `[..., n, n]` over whatever leading axes it carries and
+        `vec` is `[..., n]`; the `None` opens the row axis the contraction
+        sums over. Broadcasting does the rest, which is what lets a single
+        spelling serve `mul` (no extra axis), `scale` (a stack on the right),
+        and a `matvec` column (an `m` axis on the left the vector lacks).
+        """
+        return (gathered * vec[..., None, :]).sum(axis=-1)
 
     def add(self, a: _S, b: _S) -> _S:
         domain = same_domain("add", _DOMAINS, a, b)
@@ -737,4 +807,180 @@ class SplitRing:
         domain = same_domain("stack", _DOMAINS, *elements)
         return domain(
             tuple(fnp.stack(list(limbs)) for limbs in zip(*(e.limbs for e in elements)))
+        )
+
+    def _module_operands(
+        self, op: str, mat: Split, rhs: Split, rhs_k_axis: int, extra_mat_axes: int
+    ):
+        """The two limbs a contraction will run on, guarded.
+
+        Limbs of one element share their leading axes, so limb 0 speaks for
+        all. The guard states the contracted `k` **extent** and not merely the
+        ranks, following `RnsRing.matvec`: a size-1 axis would broadcast
+        straight past a rank check into well-shaped wrong values.
+
+        The right operand's `k` sits at `_K_AXIS` for a vector and one axis
+        further in for a matrix, which carries a width — so both that and the
+        rank difference are the caller's to state rather than this method's to
+        infer from the shapes it is checking.
+        """
+        require_domain(op, Split, mat, rhs)
+        m_limb, r_limb = mat.limbs[0], rhs.limbs[0]
+        if (
+            m_limb.ndim != r_limb.ndim + extra_mat_axes
+            or m_limb.shape[_K_AXIS] != r_limb.shape[rhs_k_axis]
+        ):
+            raise ValueError(
+                f"SplitRing.{op}: mat limbs {tuple(m_limb.shape)} do not "
+                f"contract with {tuple(r_limb.shape)}; the `k` extents must "
+                f"agree at axes {_K_AXIS} and {rhs_k_axis}"
+            )
+        return m_limb, r_limb
+
+    def matvec(self, mat: Split, vec: Split) -> Split:
+        """`A·s` over the ring: per limb `[..., m, k, 2, n] x [..., k, 2, n]
+        -> [..., m, 2, n]`.
+
+        The module layer is this shape convention rather than a type of its
+        own — a vector of ring elements is an element whose limbs carry a
+        leading axis — which is what `RnsRing.matvec` says for the NTT ring.
+        `Split`-only, because the contraction is this ring's product and that
+        is where it is defined.
+
+        No rows is a real statement, not an error: an opening with no linear
+        relations attached contracts to the empty stack, the answer
+        `_HostRingBase.matvec` gives for the same shape.
+        """
+        self._module_operands(
+            "matvec", mat, vec, rhs_k_axis=_K_AXIS, extra_mat_axes=1
+        )
+        return Split(
+            tuple(
+                self._contract(self._gathered(x, i), y[..., None, :, :, :]).sum(
+                    axis=_K_AXIS
+                )
+                for i, (x, y) in enumerate(zip(mat.limbs, vec.limbs))
+            )
+        )
+
+    def matmul(self, mat: Split, other: Split) -> Split:
+        """`mat @ other`: per limb `[..., m, k, 2, n] x [..., k, w, 2, n]
+        -> [..., m, w, 2, n]`.
+
+        `matvec`'s two-sided sibling, and the op the gather exists for: `T`
+        is built once over `mat` and reduced against each of `other`'s `w`
+        columns, rather than rebuilt per column. See the class docstring for
+        the two spellings this was measured against.
+
+        Unlike the host's, this one has no exactness fallback to fall to —
+        field arithmetic does not overflow the way an `int64` accumulation
+        does — so it is the same path at every operand magnitude.
+        """
+        _, o_limb = self._module_operands(
+            "matmul", mat, other, rhs_k_axis=_K_AXIS - 1, extra_mat_axes=0
+        )
+        width = o_limb.shape[_K_AXIS]
+        halves = []
+        for i, (x, y) in enumerate(zip(mat.limbs, other.limbs)):
+            # Gathered once, here, and reduced against every column below.
+            gathered = self._gathered(x, i)
+            columns = [
+                self._contract(gathered, y[..., :, w, :, :][..., None, :, :, :])
+                .sum(axis=_K_AXIS)
+                for w in range(width)
+            ]
+            halves.append(fnp.stack(columns, axis=_K_AXIS))
+        return Split(tuple(halves))
+
+    def scale(self, element: Split, stack: Split) -> Split:
+        """The module scalar action `element · stack[i]` per row — `matvec`'s
+        rank-one sibling, a challenge acting on a commitment vector being the
+        caller it exists for.
+
+        `mul` already computes this: it gathers its **left** operand and
+        broadcasts against the right, so one element against a stack is one
+        gather reused down the stack, which is exactly the shape wanted here.
+        What this adds is the statement — `mul` would broadcast two stacks,
+        or an element against a matrix, into a well-shaped answer to a
+        question nobody asked, and the rank guard is the difference between
+        naming the operation and inferring it from whatever shapes arrived.
+        """
+        require_domain("scale", Split, element, stack)
+        e_limb, s_limb = element.limbs[0], stack.limbs[0]
+        if s_limb.ndim != e_limb.ndim + 1:
+            raise ValueError(
+                f"SplitRing.scale: expected one element {tuple(e_limb.shape)} "
+                f"against a stack of them, got {tuple(s_limb.shape)}"
+            )
+        return self.mul(element, stack)
+
+    def combine(self, weights, stack: _S) -> _S:
+        """`Σ_u weights[u] · stack[u]`, contracting the stack's leading axis.
+
+        `matvec`'s scalar sibling: that one contracts against ring elements,
+        this against plain `Z_q` scalars — a Fiat-Shamir aggregation
+        weighting a batch of statements is the caller. Whatever the stack
+        carries past the contracted axis rides along, so one call serves a
+        stack of elements and a stack of whole matrix rows alike.
+
+        `weights` may carry a leading axis: rank 1 is one sum, rank 2 a batch
+        of them, `(rows, terms)` in and one sum per row out. Rank 2 is where
+        it stops because that is the shape the caller arrives with.
+
+        Domain-generic, like `mul_scalar` and for the same reason: `to_split`
+        is linear, so a `Z_q` scalar acts entrywise in either domain and the
+        aggregation gives the same element whichever side of the crossing it
+        happens on.
+
+        Contracted **densely**, where `_HostRingBase.combine` skips positions
+        that are zero across the whole stack. That skip is the host oracle's
+        cost model and not part of the op's contract — occupancy is a
+        property of live data, which a traced graph does not get to branch on.
+        """
+        domain = same_domain("combine", _DOMAINS, stack)
+        weights = np.asarray(weights)
+        if weights.ndim not in (1, 2):
+            raise ValueError(
+                f"SplitRing.combine: expected weights of rank 1 (one sum) or "
+                f"rank 2 (a batch of them), got shape {weights.shape!r}"
+            )
+        terms = stack.limbs[0].shape[0]
+        if weights.shape[-1] != terms:
+            raise ValueError(
+                f"SplitRing.combine: got {weights.shape[-1]} weights for a "
+                f"stack of {terms} rows"
+            )
+        rows = []
+        for i, limb in enumerate(stack.limbs):
+            # The weights broadcast against everything the stack carries past
+            # the contracted axis, so they need its rank, not its extents.
+            w = self._scalars(weights, i).reshape(
+                weights.shape + (1,) * (limb.ndim - 1)
+            )
+            rows.append((limb * w).sum(axis=weights.ndim - 1))
+        return domain(tuple(rows))
+
+    def galois(self, a: Coeff, k: int) -> Coeff:
+        """`σ_k : X ↦ X^k` on coefficients — one gather and one sign select
+        per limb, off `roots.galois_gather_table`.
+
+        `Coeff`-only, and the domain type is what proves it: σ_k permutes
+        coefficients, and a CRT half holds a residue modulo `X^{d/2} ∓ r`
+        with none to permute. There is a split-domain action — σ₋₁ swaps the
+        two halves and reverses each with a twist — but it is a different
+        derivation, and nothing has asked for it; a consumer crossing per
+        automorphism pays `O(d)`, which is what `to_split` costs anyway.
+
+        Elementwise, so it carries leading batch axes like `add`/`neg`: σ_k
+        of a module vector is σ_k of each of its elements, and a consumer
+        lifting a whole vector through an automorphism would otherwise spell
+        that loop itself.
+        """
+        require_domain("galois", Coeff, a)
+        src, negate = galois_gather_table(self.d, k)
+        return Coeff(
+            tuple(
+                fnp.where(negate, -g, g)
+                for g in (fnp.take(limb, src, axis=-1) for limb in a.limbs)
+            )
         )

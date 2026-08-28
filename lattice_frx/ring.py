@@ -93,7 +93,7 @@ from frx import lax
 from lattice_frx.domains import Coeff, Eval, require_domain, same_domain
 from lattice_frx.roots import (
     bit_reverse,
-    galois_map,
+    galois_gather_table,
     normalize_galois_k,
     prime_factors,
     primitive_root,
@@ -137,7 +137,6 @@ class RnsRing:
         # Per-`k` gather/sign and permutation tables for the two `galois`
         # forms — trace-time constants, built lazily because most rings
         # never rotate.
-        self._galois_tables: dict[int, tuple[Any, Any]] = {}
         self._galois_eval_perms: dict[int, Any] = {}
 
     def _limbs_from_host(self, arr: np.ndarray) -> tuple[Any, ...]:
@@ -267,19 +266,9 @@ class RnsRing:
         return Eval(tuple(fnp.take(limb, perm, axis=-1) for limb in a.limbs))
 
     def _galois_table(self, k: int):
-        """`(src, negate)` for `σ_k` as a gather: output index `m` reads
-        source `src[m]`, negated where `negate[m]` — `galois_map`'s forward
-        action inverted by two numpy scatters. One bool mask serves every
-        limb; the sign is a `where`, not per-limb sign arrays."""
-        key = normalize_galois_k(self.d, k)
-        if key not in self._galois_tables:
-            dest, negate = galois_map(self.d, key)
-            src = np.empty(self.d, dtype=np.int32)
-            src[dest] = np.arange(self.d, dtype=np.int32)
-            negate_at_dest = np.zeros(self.d, dtype=bool)
-            negate_at_dest[dest] = negate
-            self._galois_tables[key] = (src, negate_at_dest)
-        return self._galois_tables[key]
+        """`(src, negate)` for `σ_k` as a gather — `roots.galois_gather_table`,
+        which both traced rings share and which caches on `(d, k)`."""
+        return galois_gather_table(self.d, k)
 
     def _galois_eval_perm(self, k: int):
         """Both directions of the slot↔exponent map are closed-form

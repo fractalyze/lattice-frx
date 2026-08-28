@@ -15,8 +15,11 @@ unique prime factors feeds the search, so any correct factorization agrees on
 it.
 """
 
+import functools
 import math
 import random
+
+import numpy as np
 
 from lattice_frx.primes import is_prime as _is_prime
 
@@ -120,6 +123,37 @@ def galois_map(d: int, k: int) -> tuple[list[int], list[bool]]:
         dest.append(j - d if j >= d else j)
         negate.append(j >= d)
     return dest, negate
+
+
+@functools.lru_cache(maxsize=None)
+def galois_gather_table(d: int, k: int):
+    """`σ_k` as a gather: output index `m` reads source `src[m]`, negated
+    where `negate[m]`.
+
+    `galois_map`'s forward action inverted by two scatters. Both traced rings
+    apply `σ_k` this way — one `take` and one sign `where` per limb — so the
+    inversion lives here, beside the map it inverts, rather than once per
+    ring. One bool mask serves every limb; the sign is a `where`, not per-limb
+    sign arrays.
+
+    `k` is not normalised here: `galois_map` does it on entry, so a second
+    call could not change the answer — and it is what raises on an even `k`,
+    which is a projection rather than a ring map.
+
+    Cached because it is a pure function of `(d, k)` and every call rebuilds
+    the same two arrays. Two `k` that differ by `2d` are separate cache keys
+    holding equal tables, which costs a little memory and keeps the key the
+    caller's own value. Host arrays only — a traced value must never be
+    cached, since whichever call fills the cache decides what lands in it.
+    """
+    dest, negate = galois_map(d, k)
+    src = np.empty(d, dtype=np.int32)
+    src[dest] = np.arange(d, dtype=np.int32)
+    negate_at_dest = np.zeros(d, dtype=bool)
+    negate_at_dest[dest] = negate
+    src.flags.writeable = False
+    negate_at_dest.flags.writeable = False
+    return src, negate_at_dest
 
 
 def slot_exponents(d: int) -> list[int]:
