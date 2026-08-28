@@ -45,6 +45,38 @@ def _random_canonical(rng, *lead: int) -> np.ndarray:
     return HostSplitRing(_Q_MODULI, _D).uniform_stack(rng, *lead)
 
 
+
+def _host_split_stack(host, arrays: np.ndarray) -> np.ndarray:
+    """`HostSplitRing.to_split` applied over a stack.
+
+    The host view is rank-one — its `_coerce` refuses a batched array, where
+    the traced `to_split` carries every leading axis — so a batched
+    expectation has to be walked. Worth doing rather than weakening the
+    assertion: it keeps the oracle the host's own `low ± r·high`, instead of
+    a second spelling of the thing under test.
+    """
+    flat = arrays.reshape(-1, *arrays.shape[-2:])
+    out = np.stack([host.to_split(element) for element in flat])
+    return out.reshape(*arrays.shape[:-2], *out.shape[1:])
+
+
+def _host_scalars(ring, per_limb) -> np.ndarray:
+    """A per-limb tuple of `Z_q` arrays in the host's `lead + (limbs,)` layout.
+
+    `constant_coeff` returns one array per limb because a constant
+    coefficient is a `Z_q` value rather than a ring element — so the
+    comparison against `_HostRingBase.constant_coeff` has to name the axis
+    order the host puts the limbs in, which is last.
+    """
+    del ring
+    rows = [np.asarray(limb).astype(object) for limb in per_limb]
+    return np.stack(
+        [np.array([int(v) for v in row.reshape(-1)], dtype=np.uint64).reshape(row.shape)
+         for row in rows],
+        axis=-1,
+    )
+
+
 def _traced_product(ring, a: np.ndarray, b: np.ndarray, mul=None) -> np.ndarray:
     """`a·b` the way a consumer would spell it: host arrays in, the `Split`
     domain across the product, host bytes out.
@@ -273,6 +305,165 @@ class TracedSplitRingOpsTest(parameterized.TestCase):
         np.testing.assert_array_equal(ring.to_host(stacked), np.stack(arrays))
 
 
+
+class TracedSplitRingConstructorTest(parameterized.TestCase):
+    """The constructors a consumer needs to build operands without dropping
+    to the host ring.
+
+    Every one is pinned byte-for-byte against `HostSplitRing`'s counterpart
+    through `to_host`. That is a real oracle rather than a restatement: the
+    host builds `(limbs, d)` `uint64` arrays out of exact Python ints, while
+    these build one `prime_field` array per limb and never share a line of
+    it — the repo's rule that an oracle spelled like the code's own other
+    branch proves nothing.
+    """
+
+    @parameterized.named_parameters(("element", ()), ("vector", (3,)), ("matrix", (2, 3)))
+    def test_coefficient_zeros_match_the_host(self, lead):
+        ring, host = _rings()
+        np.testing.assert_array_equal(
+            ring.to_host(ring.zeros(Coeff, *lead)), host.zeros(*lead)
+        )
+
+    @parameterized.named_parameters(("element", ()), ("vector", (3,)))
+    def test_split_zeros_are_the_host_zero_in_the_crt_view(self, lead):
+        ring, host = _rings()
+        np.testing.assert_array_equal(
+            ring.to_host(ring.zeros(Split, *lead)),
+            _host_split_stack(host, host.zeros(*lead)),
+        )
+
+    def test_the_empty_stack_survives_the_host_boundary(self):
+        """`zeros(domain, 0)` is `matvec`'s answer when it contracts nothing —
+        a real statement, so the shape has to round-trip rather than raise."""
+        ring, host = _rings()
+        np.testing.assert_array_equal(ring.to_host(ring.zeros(Coeff, 0)), host.zeros(0))
+        self.assertEqual(
+            ring.to_host(ring.zeros(Split, 0)).shape, (0, len(_Q_MODULI), 2, _D // 2)
+        )
+
+    def test_zeros_refuses_the_other_rings_domain(self):
+        ring, _ = _rings()
+        with self.assertRaisesRegex(TypeError, r"SplitRing\.zeros"):
+            ring.zeros(Eval, 2)
+
+    def test_zeros_is_the_additive_identity_in_both_domains(self):
+        ring, _ = _rings()
+        element = ring.coeff_from_host(_random_canonical(np.random.default_rng(30)))
+        np.testing.assert_array_equal(
+            ring.to_host(ring.add(element, ring.zeros(Coeff))), ring.to_host(element)
+        )
+        split = ring.to_split(element)
+        np.testing.assert_array_equal(
+            ring.to_host(ring.add(split, ring.zeros(Split))), ring.to_host(split)
+        )
+
+    def test_multiplying_by_the_split_zero_annihilates(self):
+        ring, _ = _rings()
+        arr = _random_canonical(np.random.default_rng(31))
+        split = ring.to_split(ring.coeff_from_host(arr))
+        np.testing.assert_array_equal(
+            ring.to_host(ring.mul(split, ring.zeros(Split))), ring.to_host(ring.zeros(Split))
+        )
+
+    def test_one_matches_the_host_and_is_the_coefficient_domain(self):
+        ring, host = _rings()
+        np.testing.assert_array_equal(ring.to_host(ring.one()), host.one())
+        self.assertIsInstance(ring.one(), Coeff)
+
+    def test_one_is_the_multiplicative_identity_through_the_split_domain(self):
+        """`one` is named for the ring element, so the identity it claims has
+        to hold where this ring's product actually lives."""
+        ring, _ = _rings()
+        arr = _random_canonical(np.random.default_rng(32))
+        split = ring.to_split(ring.coeff_from_host(arr))
+        np.testing.assert_array_equal(
+            ring.to_host(ring.mul(split, ring.to_split(ring.one()))), ring.to_host(split)
+        )
+
+    @parameterized.named_parameters(("element", ()), ("vector", (4,)), ("matrix", (2, 3)))
+    def test_constant_coeff_matches_the_host(self, lead):
+        ring, host = _rings()
+        arr = _random_canonical(np.random.default_rng(33), *lead)
+        got = ring.constant_coeff(ring.coeff_from_host(arr))
+        np.testing.assert_array_equal(_host_scalars(ring, got), host.constant_coeff(arr))
+
+    def test_constant_coeff_returns_one_array_per_limb(self):
+        """Not a domain type: a constant coefficient is a `Z_q` value, and
+        dressing it as a ring element would be a lie in a plausible shape."""
+        ring, _ = _rings()
+        arr = _random_canonical(np.random.default_rng(34), 5)
+        got = ring.constant_coeff(ring.coeff_from_host(arr))
+        self.assertIsInstance(got, tuple)
+        self.assertNotIsInstance(got, (Coeff, Split))
+        self.assertLen(got, len(_Q_MODULI))
+        self.assertEqual(tuple(np.asarray(got[0]).shape), (5,))
+
+    def test_constant_coeff_refuses_the_split_domain(self):
+        """A CRT half holds no coefficient, so asking one for its constant
+        term is the bug this domain typing exists to catch."""
+        ring, _ = _rings()
+        arr = _random_canonical(np.random.default_rng(35))
+        split = ring.to_split(ring.coeff_from_host(arr))
+        with self.assertRaisesRegex(TypeError, r"constant_coeff.*Coeff"):
+            ring.constant_coeff(split)
+
+    @parameterized.named_parameters(("one_row", 1), ("many_rows", 5))
+    def test_from_signed_stack_matches_the_host(self, k):
+        ring, host = _rings()
+        rows = np.random.default_rng(36).integers(-40, 41, size=(k, _D))
+        np.testing.assert_array_equal(
+            ring.to_host(ring.from_signed_stack(rows)), host.from_signed_stack(rows)
+        )
+
+    def test_from_signed_stack_takes_a_sequence_of_rows(self):
+        """The host's own signature: a `(k, d)` array *or* a sequence of
+        length-`d` rows, since a consumer assembling one row at a time is the
+        caller it exists for."""
+        ring, host = _rings()
+        rows = [[i - 3] * _D for i in range(4)]
+        np.testing.assert_array_equal(
+            ring.to_host(ring.from_signed_stack(rows)), host.from_signed_stack(rows)
+        )
+
+    def test_from_signed_stack_rejects_an_empty_stack(self):
+        """No rows is not the empty stack `zeros(domain, 0)` is. Without the
+        guard the limbs come out shaped `(0,)` rather than `(0, d)` — a
+        well-shaped nonsense that every later op would carry silently, which
+        is why the empty case is refused here and spelled by `zeros`."""
+        ring, _ = _rings()
+        with self.assertRaisesRegex(ValueError, r"SplitRing\.from_signed_stack"):
+            ring.from_signed_stack([])
+
+    def test_from_signed_stack_rejects_a_rank_one_input(self):
+        """One element's coefficients where a stack was wanted. It reads as a
+        shape mistake and has to be reported as one — the comprehension would
+        otherwise surface it as `not iterable`, which names neither of the two
+        failure modes this package keeps apart."""
+        ring, _ = _rings()
+        with self.assertRaisesRegex(ValueError, r"SplitRing\.from_signed_stack"):
+            ring.from_signed_stack(np.zeros(_D, dtype=np.int64))
+
+    def test_from_signed_stack_rejects_a_wrong_row_length(self):
+        ring, _ = _rings()
+        with self.assertRaisesRegex(ValueError, r"SplitRing\.from_signed_stack"):
+            ring.from_signed_stack(np.zeros((2, _D - 1), dtype=np.int64))
+
+    @parameterized.named_parameters(("element", ()), ("vector", (3,)), ("matrix", (2, 3)))
+    def test_uniform_stack_is_byte_identical_to_the_host(self, lead):
+        """Same seed, same bytes — which pins the order the limbs are drawn
+        in. A distribution test would pass with the limbs swapped, and a
+        consumer whose transcript replays these draws would not."""
+        ring, host = _rings()
+        got = ring.uniform_stack(np.random.default_rng(37), *lead)
+        want = host.uniform_stack(np.random.default_rng(37), *lead)
+        np.testing.assert_array_equal(ring.to_host(got), want)
+
+    def test_uniform_stack_is_the_coefficient_domain(self):
+        ring, _ = _rings()
+        self.assertIsInstance(ring.uniform_stack(np.random.default_rng(38), 2), Coeff)
+
+
 class TracedSplitRingTracingTest(parameterized.TestCase):
     """The reason this ring exists beside the host one."""
 
@@ -291,6 +482,34 @@ class TracedSplitRingTracingTest(parameterized.TestCase):
         got = _traced_product(ring, a, b, mul=frx.vmap(ring.mul))
         want = np.stack([host.mul(a[i], b[i]) for i in range(k)])
         np.testing.assert_array_equal(got, want)
+
+    def test_the_interior_constructors_hold_under_jit(self):
+        """`zeros`/`one`/`constant_coeff` are the three that have to survive
+        tracing — the other two take host data (a generator, raw signed ints)
+        and are boundary constructors by nature."""
+        ring, host = _rings()
+        arr = _random_canonical(np.random.default_rng(39), 3)
+
+        def leading_coeffs(x):
+            shifted = ring.add(x, ring.zeros(Coeff, 3))
+            return ring.constant_coeff(shifted)
+
+        got = frx.jit(leading_coeffs)(ring.coeff_from_host(arr))
+        np.testing.assert_array_equal(_host_scalars(ring, got), host.constant_coeff(arr))
+        np.testing.assert_array_equal(
+            ring.to_host(frx.jit(ring.one)()), host.one()
+        )
+
+    def test_the_interior_constructors_hold_under_vmap(self):
+        ring, host = _rings()
+        k = 4
+        arr = _random_canonical(np.random.default_rng(40), k)
+
+        def annihilate(x):
+            return ring.mul(ring.to_split(x), ring.zeros(Split))
+
+        got = ring.to_host(frx.vmap(annihilate)(ring.coeff_from_host(arr)))
+        np.testing.assert_array_equal(got, _host_split_stack(host, host.zeros(k)))
 
     def test_a_ring_survives_being_traced_first(self):
         """The ring caches trace-time constants, and the call that fills the

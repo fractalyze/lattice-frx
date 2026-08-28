@@ -348,6 +348,15 @@ class SplitRing:
     `HostSplitRing`-only. The domain and the product are what a consumer
     needs pinned first, since the module ops contract *through* `mul` and a
     wrong twist would be inherited by all of them.
+
+    The **constructors** are here, though, and they come before that layer
+    on purpose. Counted across the only consumer, `zeros`, `one`,
+    `uniform_stack` and `from_signed_stack` are reached an order of
+    magnitude more often than `mul` is, and without them a consumer builds
+    every operand through `HostSplitRing` and crosses `coeff_from_host` —
+    so `SplitRing` could not close a `jit` zone even for a `mul`-only
+    workload. A ring that passes every boundary check and is still unusable
+    by its consumer is the failure this package has hit before.
     """
 
     def __init__(self, q_moduli, d: int) -> None:
@@ -484,6 +493,135 @@ class SplitRing:
                 for q, field in zip(self.q_moduli, self.fields)
             )
         )
+
+    def from_signed_stack(self, rows) -> Coeff:
+        """`from_signed` per row: a `(k, d)` array — or a sequence of
+        length-`d` rows — as a `Coeff` whose limbs carry one leading axis.
+
+        The module convention's constructor and `_HostRingBase`'s
+        counterpart, deliberately not `stack([from_signed(r) for r in rows])`:
+        that reduces and converts `k` times and then asks the array layer to
+        join the results, where one reduction over the whole block and one
+        conversion per limb say the same thing.
+
+        The reduction runs in object dtype so numpy drives the loop over
+        exact Python ints, which is what lets raw signed values through — a
+        `-1` witness coefficient reduces to `q-1` here rather than
+        truncating in a lane on the way in.
+        """
+        def bad(detail: str) -> ValueError:
+            return ValueError(
+                f"SplitRing.from_signed_stack: expected a non-empty "
+                f"(k, {self.d}) stack of signed values, got {detail}"
+            )
+
+        try:
+            block = [[int(v) for v in row] for row in rows]
+        except TypeError as exc:
+            # A rank-one input — one element's coefficients, where a stack of
+            # them was wanted. It has to land as a shape `ValueError` and not
+            # as the `TypeError` the comprehension would otherwise raise: this
+            # package keeps the two failure modes apart because they are
+            # different caller bugs, and "not iterable" names neither.
+            raise bad("a rank-one input") from exc
+        if not block or any(len(row) != self.d for row in block):
+            raise bad(
+                f"{len(block)} rows of lengths "
+                f"{sorted({len(row) for row in block})}"
+            )
+        values = np.array(block, dtype=object)
+        return Coeff(
+            tuple(
+                fnp.asarray((values % q).astype(np.uint64).astype(field))
+                for q, field in zip(self.q_moduli, self.fields)
+            )
+        )
+
+    def zeros(self, domain: type, *lead: int) -> Coeff | Split:
+        """The additive identity of `domain`, as a `lead`-shaped stack.
+
+        Unlike `one`, zero is the *same* element in both domains — `to_split`
+        is linear, so it carries `0` to `0` — which is exactly why the domain
+        has to be said here rather than inferred from the value. `zeros(D, 0)`
+        is the empty stack a contraction over nothing hands back, which
+        `_HostRingBase.matvec` documents as a real statement rather than an
+        error.
+
+        The domain arrives as a **type, not a flag**: it is fixed at trace
+        time, it names the return type instead of branching on it inside the
+        graph, and it is the same thing `_tail` and `_limbs_from_host`
+        already take. The runtime `IsNTT`-style flag CLAUDE.md rejects is a
+        different animal — that one splits a trace for information the graph
+        already has.
+        """
+        if domain not in _DOMAINS:
+            raise TypeError(
+                f"SplitRing.zeros: expected one of "
+                f"{', '.join(d.__name__ for d in _DOMAINS)}, got "
+                f"{getattr(domain, '__name__', domain)!r}"
+            )
+        shape = (*lead, *self._tail(domain))
+        return domain(tuple(fnp.zeros(shape, dtype=field) for field in self.fields))
+
+    def one(self) -> Coeff:
+        """The multiplicative identity, **in the coefficient domain**.
+
+        Named for the ring element rather than for whichever domain this
+        ring's product happens to live in, matching `_HostRingBase.one` for
+        the reason it gives: returning the `Split` view here would make `one`
+        two different elements across the two rings under a single name. A
+        consumer multiplying by it crosses, and that `to_split` folds to a
+        constant under `jit`.
+        """
+        return self.from_signed([1] + [0] * (self.d - 1))
+
+    def uniform_stack(self, rng: np.random.Generator, *lead: int) -> Coeff:
+        """A `lead`-shaped stack of independent uniform elements, in `Coeff`.
+
+        Uniform per limb is uniform over `R_q` by CRT, so here the domain is
+        a choice rather than a constraint; `Coeff` keeps one answer and
+        matches the array `to_host` hands `HostSplitRing`.
+
+        A **boundary** constructor: it holds a host generator, so it cannot
+        run under `jit`. That is the honest outcome rather than a traced RNG
+        this package does not own — the same stance `to_balanced_limb0`
+        takes — and the generator is injected like every other randomness
+        consumer here.
+
+        Drawn limb by limb in `q_moduli` order, which is `_HostRingBase`'s
+        own order, so the two rings are byte-identical at one seed. A
+        consumer replaying these draws depends on that order and not merely
+        on the distribution.
+        """
+        return Coeff(
+            tuple(
+                fnp.asarray(
+                    rng.integers(0, q, size=(*lead, self.d), dtype=np.uint64).astype(field)
+                )
+                for q, field in zip(self.q_moduli, self.fields)
+            )
+        )
+
+    def constant_coeff(self, a: Coeff) -> tuple[Any, ...]:
+        """Every element's constant coefficient, one `Z_q` array per limb.
+
+        `Coeff`-only, and the domain type is what proves it: a CRT half holds
+        a residue modulo `X^{d/2} ∓ r` and has no constant term to read, so
+        asking one for it is a bug in a plausible shape.
+
+        Deliberately **not** a domain type on the way out. What comes back is
+        a `Z_q` value per limb, not a ring element, and dressing it as `Coeff`
+        would put a ring-element type on something no ring op can take. A
+        bare tuple is already a pytree, so it threads `jit`/`vmap` without a
+        registration of its own — and unlike the host's, it needs no
+        defensive copy, because a traced array cannot be written through.
+
+        Named rather than left to the caller as `limb[..., 0]` for the reason
+        `_HostRingBase.constant_coeff` gives: that index is this backend's
+        array layout, not the ring's interface.
+        """
+        require_domain("constant_coeff", Coeff, a)
+        return tuple(limb[..., 0] for limb in a.limbs)
 
     def to_split(self, a: Coeff) -> Split:
         """The two-factor CRT view: half `h` is `low + s·high` for `s = +r`
